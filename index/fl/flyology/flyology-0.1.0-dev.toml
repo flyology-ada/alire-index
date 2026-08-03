@@ -19,11 +19,16 @@ gnat = ">=13 & <17"
 
 [environment]
 FLYOLOGY_ROOT.set = "${CRATE_ROOT}"
+GPR_CONFIG.set = "${CRATE_ROOT}/build/flyology.cgpr"
+
+[[actions]]
+type = "post-fetch"
+command = ["./scripts/prepare-alire-rts.sh"]
 
 [[actions]]
 type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "6347fa841578d59660cc14f9f1003a3cc56f0c7c"
+commit = "57e30f39f0fe9ae59cff717a1e22fc0153c15322"
 url = "git+https://github.com/yrashk/flyology.git"
