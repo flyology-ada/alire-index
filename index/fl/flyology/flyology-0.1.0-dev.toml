@@ -1,0 +1,29 @@
+name = "flyology"
+description = "Lightweight tasks with ordinary Ada semantics for the GNAT runtime"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "(MIT OR Apache-2.0) AND GPL-3.0-or-later WITH GCC-exception-3.1"
+website = "https://flyology.org/"
+tags = ["ada", "runtime", "event-loop", "concurrency", "lightweight", "spark"]
+project-files = ["flyology.gpr"]
+
+[[depends-on]]
+gnat = ">=13 & <17"
+
+[available.'case(os)']
+'linux|macos' = true
+'...' = false
+
+[environment]
+FLYOLOGY_ROOT.set = "${CRATE_ROOT}"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "6347fa841578d59660cc14f9f1003a3cc56f0c7c"
+url = "git+https://github.com/yrashk/flyology.git"
