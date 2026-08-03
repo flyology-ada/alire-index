@@ -31,4 +31,4 @@ command = ["./scripts/test.sh"]
 
 [origin]
 commit = "b8cc95732f05fd062e2045d93039b9fde43a05c3"
-url = "git+https://github.com/yrashk/flyology.git"
+url = "git+https://github.com/flyology-ada/flyology.git"
