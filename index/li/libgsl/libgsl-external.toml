@@ -1,9 +1,0 @@
-description = "The GNU Scientific Library (GSL)"
-name = "libgsl"
-
-maintainers = ["alejandro@mosteo.com"]
-maintainers-logins = ["mosteo"]
-
-[[external]]
-kind = "system"
-origin = ["libgsl-dev"]

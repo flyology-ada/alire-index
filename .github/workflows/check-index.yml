@@ -1,35 +1,23 @@
-name: Check Index
+name: Check index
 
-env:
-  ALR_VERSION: 2.1.1
+on:
+  push:
+    branches: [main]
+  pull_request:
 
-on: pull_request
+permissions:
+  contents: read
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up stable `alr`
-      if: contains(github.base_ref, 'stable-')
-      uses: alire-project/setup-alire@latest
-      with:
-        version: ${{env.ALR_VERSION}}
+      - uses: alire-project/setup-alire@v6.0.0
+        with:
+          version: 2.1.1
 
-    - name: Set up devel `alr`
-      if: contains(github.base_ref, 'devel-')
-      uses: alire-project/setup-alire@latest
-      with:
-        branch: master
-
-    - run: alr index --list
-
-    - run: alr index --add=. --name=local_index
-
-    # Check index contents for unknown config variables
-    - run: alr index --check
-
-    - run: alr index --update-all
-
-    - run: alr search --crates
+      - run: alr index --add=. --name=flyology
+      - run: alr index --check
+      - run: alr search --crates

@@ -1,13 +1,21 @@
-# Alire Community Index
+# Flyology Alire index
 
-[![Gitter chat](https://badges.gitter.im/gitterHQ/gitter.png)](https://gitter.im/ada-lang/Alire)
+This index contains development and release manifests maintained by the
+[Flyology organization](https://github.com/flyology-ada). It is separate from
+the Alire community index.
 
-This repository hosts the official community-maintained index to be used with the `alr` tool. 
+Keep the community index enabled for compiler and third-party dependency
+resolution, then add this index ahead of it:
 
-Please visit https://github.com/alire-project/alire to download `alr`.
+```sh
+alr index --reset-community
+alr index --add=git+https://github.com/flyology-ada/alire-index.git \
+  --name=flyology --before=community
+```
 
-Please open a pull request to submit a new release (read
-further [here](https://alire.ada.dev/docs/#publishing-your-projects-in-alire)
-about it). 
+The repository's default branch is `main`. Release origins remain pinned to
+exact source commits so an indexed version does not change after publication.
 
-To report an issue, open it at https://github.com/alire-project/alire/issues
+## Packages
+
+- `flyology` `0.1.0-dev`
