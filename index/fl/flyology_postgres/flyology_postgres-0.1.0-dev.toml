@@ -1,0 +1,19 @@
+name = "flyology_postgres"
+description = "Postgres client and protocol server for Flyology tasks"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://github.com/flyology-ada/flyology-postgres"
+tags = ["ada", "postgres", "database", "client", "server", "protocol"]
+
+[[depends-on]]
+flyology = "~0.1.0-dev"
+system_random = "^1.0.0"
+hmac_ada = "^0.2.0"
+
+[origin]
+commit = "b85eb9aaf54cb539d19ff13ea6e5c0181c7dacb9"
+url = "git+https://github.com/flyology-ada/flyology-postgres.git"

@@ -19,3 +19,4 @@ exact source commits so an indexed version does not change after publication.
 ## Packages
 
 - `flyology` `0.1.0-dev`
+- `flyology_postgres` `0.1.0-dev`
