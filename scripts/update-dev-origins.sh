@@ -3,19 +3,25 @@ set -eu
 
 usage () {
   cat <<'EOF'
-Usage: ./scripts/update-dev-origins.sh [--commit] [--push]
+Usage: ./scripts/update-dev-origins.sh [--crate NAME]... [--commit] [--push]
 
 Fast-forward this index checkout, then pin every *-dev.toml manifest to the
 HEAD advertised by its configured Git origin. Manifests that share an origin
 are advanced to the same exact commit.
 
+  --crate NAME
+            update only the origin group containing NAME; may be repeated
   --commit  commit the validated manifest updates
   --push    commit the updates and push the current branch
   -h, --help
             show this help
 
-The checkout must be clean, attached to a branch, and have an upstream.
-Alire is taken from $ALR when set, or from PATH otherwise.
+With no --crate option, every development origin is updated. Selecting one
+crate updates all development manifests that share its origin so packages from
+one source repository cannot acquire inconsistent pins.
+
+The checkout must be clean, attached to a branch, and have an upstream. Alire
+is taken from $ALR when set, or from PATH otherwise.
 EOF
 }
 
@@ -26,9 +32,29 @@ fail () {
 
 commit_changes=0
 push_changes=0
+selected_crates=
+
+select_crate () {
+  crate_name=$1
+  case $crate_name in
+    ''|*[!a-z0-9_]*) fail "invalid crate name: $crate_name" ;;
+  esac
+  case " $selected_crates " in
+    *" $crate_name "*) ;;
+    *) selected_crates="${selected_crates}${selected_crates:+ }$crate_name" ;;
+  esac
+}
 
 while [ "$#" -gt 0 ]; do
   case $1 in
+    --crate)
+      [ "$#" -ge 2 ] || fail "--crate requires a crate name"
+      shift
+      select_crate "$1"
+      ;;
+    --crate=*)
+      select_crate "${1#--crate=}"
+      ;;
     --commit)
       commit_changes=1
       ;;
@@ -98,9 +124,13 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 manifest_list="$temporary_root/manifests"
+manifest_inventory="$temporary_root/manifest-inventory"
 remote_heads="$temporary_root/remote-heads"
+selected_origins="$temporary_root/selected-origins"
 update_plan="$temporary_root/update-plan"
+: >"$manifest_inventory"
 : >"$remote_heads"
+: >"$selected_origins"
 : >"$update_plan"
 
 (
@@ -108,6 +138,32 @@ update_plan="$temporary_root/update-plan"
   find index -type f -name '*-dev.toml' -print | LC_ALL=C sort
 ) >"$manifest_list"
 [ -s "$manifest_list" ] || fail "no development manifests were found"
+
+top_level_field () {
+  field=$1
+  manifest=$2
+  awk -v field="$field" '
+    BEGIN { in_top_level = 1 }
+    /^\[[^]]+\][[:space:]]*$/ { in_top_level = 0 }
+    in_top_level && $0 ~ "^[[:space:]]*" field "[[:space:]]*=" {
+      value = $0
+      if (value !~ /^[^=]+=[[:space:]]*"[^"]+"[[:space:]]*$/) {
+        invalid = 1
+        next
+      }
+      sub(/^[^=]+=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      found++
+      result = value
+    }
+    END {
+      if (invalid || found != 1) {
+        exit 1
+      }
+      print result
+    }
+  ' "$manifest"
+}
 
 origin_field () {
   field=$1
@@ -138,19 +194,58 @@ origin_field () {
 
 while IFS= read -r relative_manifest; do
   manifest="$index_root/$relative_manifest"
+  crate_name=$(top_level_field name "$manifest") || \
+    fail "$relative_manifest must contain exactly one quoted crate name"
   origin_url=$(origin_field url "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted [origin] URL"
   old_commit=$(origin_field commit "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted [origin] commit"
 
+  case $crate_name in
+    ''|*[!a-z0-9_]*) fail "$relative_manifest has an invalid crate name" ;;
+  esac
   case $origin_url in
     *"$(printf '\t')"*) fail "$relative_manifest contains a tab in its origin URL" ;;
-    git+*) remote_url=${origin_url#git+} ;;
+    git+*) ;;
     *) fail "$relative_manifest origin is not a Git URL: $origin_url" ;;
   esac
-  case $remote_url in
+  case ${origin_url#git+} in
     *'#'*) fail "$relative_manifest origin URL must not contain a revision fragment" ;;
   esac
+
+  printf '%s\t%s\t%s\t%s\n' \
+    "$relative_manifest" "$crate_name" "$origin_url" "$old_commit" \
+    >>"$manifest_inventory"
+done <"$manifest_list"
+
+if [ -z "$selected_crates" ]; then
+  awk -F '\t' '{ print $3 }' "$manifest_inventory" | \
+    LC_ALL=C sort -u >"$selected_origins"
+else
+  for requested_crate in $selected_crates; do
+    if ! awk -F '\t' -v crate="$requested_crate" '
+      $2 == crate {
+        print $3
+        found = 1
+      }
+      END { if (!found) exit 1 }
+    ' "$manifest_inventory" >>"$selected_origins"; then
+      fail "no development manifest is named $requested_crate"
+    fi
+  done
+  LC_ALL=C sort -u "$selected_origins" >"$temporary_root/sorted-origins"
+  mv "$temporary_root/sorted-origins" "$selected_origins"
+fi
+
+tab=$(printf '\t')
+while IFS="$tab" read -r \
+  relative_manifest crate_name origin_url old_commit; do
+  if ! awk -v origin="$origin_url" \
+    '$0 == origin { found = 1 } END { exit !found }' "$selected_origins"; then
+    continue
+  fi
+
+  remote_url=${origin_url#git+}
 
   new_commit=$(awk -F '\t' -v url="$origin_url" \
     '$1 == url { print $2; exit }' "$remote_heads")
@@ -175,14 +270,13 @@ while IFS= read -r relative_manifest; do
     printf '%s\t%s\t%s\n' \
       "$relative_manifest" "$old_commit" "$new_commit" >>"$update_plan"
   fi
-done <"$manifest_list"
+done <"$manifest_inventory"
 
 if [ ! -s "$update_plan" ]; then
-  printf '%s\n' "All development manifests already match their remote HEADs."
+  printf '%s\n' "Selected development manifests already match their remote HEADs."
   exit 0
 fi
 
-tab=$(printf '\t')
 while IFS="$tab" read -r relative_manifest old_commit new_commit; do
   manifest="$index_root/$relative_manifest"
   rendered="$temporary_root/rendered"

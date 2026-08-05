@@ -106,7 +106,15 @@ EOF
 chmod +x "$fake_alr"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
-  "$index_work/scripts/update-dev-origins.sh" --commit
+  "$index_work/scripts/update-dev-origins.sh" --crate missing \
+  >"$temporary_root/missing.stdout" 2>"$temporary_root/missing.stderr" && \
+  fail "unknown crate selector was accepted"
+grep -F 'no development manifest is named missing' \
+  "$temporary_root/missing.stderr" >/dev/null || \
+  fail "unknown crate selector failure was not explained"
+
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$index_work/scripts/update-dev-origins.sh" --crate alpha_extra --push
 
 [ -f "$index_work/REMOTE.md" ] || \
   fail "stale index checkout was not fast-forwarded"
@@ -116,12 +124,27 @@ for manifest in \
   grep -F "commit = \"$alpha_head\"" "$index_work/$manifest" >/dev/null || \
     fail "$manifest did not use alpha's remote HEAD"
 done
-grep -F "commit = \"$beta_head\"" \
+grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
-  fail "beta development manifest did not use beta's remote HEAD"
+  fail "unselected beta development manifest was changed"
 grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/al/alpha/alpha-0.1.0.toml" >/dev/null || \
   fail "stable manifest was changed"
+
+# Omitting selectors must retain the original update-all behavior.
+all_work="$temporary_root/index-all-work"
+git clone -q "$index_remote" "$all_work"
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$all_work/scripts/update-dev-origins.sh" --commit
+grep -F "commit = \"$beta_head\"" \
+  "$all_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
+  fail "unfiltered update did not advance beta's remote HEAD"
+
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$index_work/scripts/update-dev-origins.sh" --crate=beta --commit
+grep -F "commit = \"$beta_head\"" \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
+  fail "selected beta development manifest did not use beta's remote HEAD"
 grep -F 'index --check' "$alr_log" >/dev/null || \
   fail "Alire index validation was not run"
 [ -z "$(git -C "$index_work" status --porcelain)" ] || \

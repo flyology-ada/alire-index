@@ -32,6 +32,19 @@ It ignores local source checkouts, including unpushed commits. By default it
 leaves the changes for review; use `--commit` to create a Problem/Solution
 commit, or `--push` to commit and push the update.
 
+Pass one or more `--crate NAME` selectors to update only the chosen source
+groups. Selecting any crate advances every development manifest from the same
+origin, so the PostgreSQL facade, core, and versioned parser crates remain on
+one source commit. With no selector, the script updates every development
+origin:
+
+```sh
+./scripts/update-dev-origins.sh --crate flyology
+./scripts/update-dev-origins.sh --crate flyology_postgres --push
+./scripts/update-dev-origins.sh \
+  --crate flyology --crate flyology_postgres
+```
+
 Run the updater's isolated local-remote test with:
 
 ```sh
