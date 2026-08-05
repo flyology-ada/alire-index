@@ -21,3 +21,4 @@ jobs:
       - run: alr index --add=. --name=flyology
       - run: alr index --check
       - run: alr search --crates
+      - run: ./scripts/test-update-dev-origins.sh
