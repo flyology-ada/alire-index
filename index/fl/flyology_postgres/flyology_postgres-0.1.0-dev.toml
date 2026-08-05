@@ -15,5 +15,5 @@ system_random = "^1.0.0"
 hmac_ada = "^0.2.0"
 
 [origin]
-commit = "19ad99ffafd33991c613d7cb69428c874c537f86"
+commit = "65981c9828128f7b75bcdc3598ea1004c3776168"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"
