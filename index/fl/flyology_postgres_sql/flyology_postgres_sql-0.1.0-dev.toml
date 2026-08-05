@@ -1,0 +1,23 @@
+name = "flyology_postgres_sql"
+description = "Versioned PostgreSQL SQL parser and owned Ada syntax trees"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://github.com/flyology-ada/flyology-postgres"
+tags = ["ada", "postgres", "sql", "parser", "ast"]
+project-files = ["sql.gpr"]
+
+[[depends-on]]
+flyology_postgres_sql_v14 = "~0.1.0-dev"
+flyology_postgres_sql_v15 = "~0.1.0-dev"
+flyology_postgres_sql_v16 = "~0.1.0-dev"
+flyology_postgres_sql_v17 = "~0.1.0-dev"
+flyology_postgres_sql_v18 = "~0.1.0-dev"
+
+[origin]
+commit = "19ad99ffafd33991c613d7cb69428c874c537f86"
+subdir = "sql"
+url = "git+https://github.com/flyology-ada/flyology-postgres.git"

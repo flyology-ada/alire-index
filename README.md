@@ -20,3 +20,10 @@ exact source commits so an indexed version does not change after publication.
 
 - `flyology` `0.1.0-dev`
 - `flyology_postgres` `0.1.0-dev`
+- `flyology_postgres_sql_core` `0.1.0-dev`
+- `flyology_postgres_sql_v14` `0.1.0-dev`
+- `flyology_postgres_sql_v15` `0.1.0-dev`
+- `flyology_postgres_sql_v16` `0.1.0-dev`
+- `flyology_postgres_sql_v17` `0.1.0-dev`
+- `flyology_postgres_sql_v18` `0.1.0-dev`
+- `flyology_postgres_sql` `0.1.0-dev`

@@ -1,5 +1,5 @@
-name = "flyology_postgres"
-description = "Postgres client and protocol server for Flyology tasks"
+name = "flyology_postgres_sql_v18"
+description = "Native PostgreSQL 18 parser and owned Ada AST"
 version = "0.1.0-dev"
 
 authors = ["Yurii Rashkovskii"]
@@ -7,13 +7,13 @@ maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
 maintainers-logins = ["yrashk"]
 licenses = "MIT OR Apache-2.0"
 website = "https://github.com/flyology-ada/flyology-postgres"
-tags = ["ada", "postgres", "database", "client", "server", "protocol"]
+tags = ["ada", "postgres", "sql", "parser", "ast"]
+project-files = ["sql_v18.gpr"]
 
 [[depends-on]]
-flyology = "~0.1.0-dev"
-system_random = "^1.0.0"
-hmac_ada = "^0.2.0"
+flyology_postgres_sql_core = "~0.1.0-dev"
 
 [origin]
 commit = "19ad99ffafd33991c613d7cb69428c874c537f86"
+subdir = "sql/v18"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"
