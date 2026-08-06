@@ -18,8 +18,9 @@ exact source commits so an indexed version does not change after publication.
 
 ## Updating development origins
 
-Run the updater from a clean `main` checkout to advance every development
-manifest to the exact `HEAD` advertised by its configured Git remote:
+Run the updater from a clean `main` checkout to advance every active
+development manifest to the exact `HEAD` advertised by its configured Git
+remote:
 
 ```sh
 ./scripts/update-dev-origins.sh
@@ -44,6 +45,13 @@ origin:
 ./scripts/update-dev-origins.sh \
   --crate flyology --crate flyology_postgres
 ```
+
+Stable releases retire old development lines per crate. For example, once
+`0.1.0` exists, the updater ignores `0.1.0-dev` and every lower `-dev` version
+of that crate, while a later `0.2.0-dev` remains active. Retired manifests are
+not grouped by origin, resolved remotely, edited, or included in generated
+commits. Other prerelease labels do not count as stable releases, and build
+metadata does not affect the three-part semantic-version comparison.
 
 Run the updater's isolated local-remote test with:
 

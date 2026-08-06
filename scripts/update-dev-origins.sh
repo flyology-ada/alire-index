@@ -5,9 +5,10 @@ usage () {
   cat <<'EOF'
 Usage: ./scripts/update-dev-origins.sh [--crate NAME]... [--commit] [--push]
 
-Fast-forward this index checkout, then pin every *-dev.toml manifest to the
+Fast-forward this index checkout, then pin every active -dev manifest to the
 HEAD advertised by its configured Git origin. Manifests that share an origin
-are advanced to the same exact commit.
+are advanced to the same exact commit. A stable release retires development
+versions of the same crate at that semantic version or lower.
 
   --crate NAME
             update only the origin group containing NAME; may be repeated
@@ -123,11 +124,17 @@ cleanup () {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-manifest_list="$temporary_root/manifests"
+catalog_list="$temporary_root/catalog-list"
+catalog_inventory="$temporary_root/catalog-inventory"
+development_candidates="$temporary_root/development-candidates"
+stable_versions="$temporary_root/stable-versions"
 manifest_inventory="$temporary_root/manifest-inventory"
 remote_heads="$temporary_root/remote-heads"
 selected_origins="$temporary_root/selected-origins"
 update_plan="$temporary_root/update-plan"
+: >"$catalog_inventory"
+: >"$development_candidates"
+: >"$stable_versions"
 : >"$manifest_inventory"
 : >"$remote_heads"
 : >"$selected_origins"
@@ -135,9 +142,10 @@ update_plan="$temporary_root/update-plan"
 
 (
   cd "$index_root"
-  find index -type f -name '*-dev.toml' -print | LC_ALL=C sort
-) >"$manifest_list"
-[ -s "$manifest_list" ] || fail "no development manifests were found"
+  find index -type f -name '*.toml' ! -path 'index/index.toml' -print | \
+    LC_ALL=C sort
+) >"$catalog_list"
+[ -s "$catalog_list" ] || fail "no release manifests were found"
 
 top_level_field () {
   field=$1
@@ -192,18 +200,95 @@ origin_field () {
   ' "$manifest"
 }
 
+semver_core_is_valid () {
+  awk -v version="$1" '
+    BEGIN {
+      if (split(version, part, ".") != 3) {
+        exit 1
+      }
+      for (i = 1; i <= 3; i++) {
+        if (part[i] !~ /^[0-9]+$/) {
+          exit 1
+        }
+      }
+    }
+  '
+}
+
+semver_at_least () {
+  candidate=${1%%+*}
+  target=$2
+  awk -v candidate="$candidate" -v target="$target" '
+    BEGIN {
+      split(candidate, left, ".")
+      split(target, right, ".")
+      for (i = 1; i <= 3; i++) {
+        if ((left[i] + 0) > (right[i] + 0)) {
+          exit 0
+        }
+        if ((left[i] + 0) < (right[i] + 0)) {
+          exit 1
+        }
+      }
+      exit 0
+    }
+  '
+}
+
 while IFS= read -r relative_manifest; do
   manifest="$index_root/$relative_manifest"
   crate_name=$(top_level_field name "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted crate name"
+  version=$(top_level_field version "$manifest") || \
+    fail "$relative_manifest must contain exactly one quoted version"
+
+  case $crate_name in
+    ''|*[!a-z0-9_]*) fail "$relative_manifest has an invalid crate name" ;;
+  esac
+  case "$crate_name$version" in
+    *"$(printf '\t')"*) fail "$relative_manifest contains a tab in its identity" ;;
+  esac
+
+  version_without_build=${version%%+*}
+  version_core=${version_without_build%%-*}
+  semver_core_is_valid "$version_core" || \
+    fail "$relative_manifest has an unsupported semantic version: $version"
+
+  printf '%s\t%s\t%s\n' \
+    "$relative_manifest" "$crate_name" "$version" >>"$catalog_inventory"
+  if [ "$version_without_build" = "${version_core}-dev" ]; then
+    printf '%s\t%s\t%s\t%s\n' \
+      "$relative_manifest" "$crate_name" "$version" "$version_core" \
+      >>"$development_candidates"
+  elif [ "$version_without_build" = "$version_core" ]; then
+    printf '%s\t%s\n' "$crate_name" "$version" >>"$stable_versions"
+  fi
+done <"$catalog_list"
+
+tab=$(printf '\t')
+while IFS="$tab" read -r \
+  relative_manifest crate_name version development_core; do
+  retired_by=
+  while IFS="$tab" read -r stable_crate stable_version; do
+    [ "$stable_crate" = "$crate_name" ] || continue
+    if semver_at_least "$stable_version" "$development_core"; then
+      retired_by=$stable_version
+      break
+    fi
+  done <"$stable_versions"
+
+  if [ -n "$retired_by" ]; then
+    printf '%s\n' \
+      "Ignoring $crate_name $version: stable $retired_by is at least as new."
+    continue
+  fi
+
+  manifest="$index_root/$relative_manifest"
   origin_url=$(origin_field url "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted [origin] URL"
   old_commit=$(origin_field commit "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted [origin] commit"
 
-  case $crate_name in
-    ''|*[!a-z0-9_]*) fail "$relative_manifest has an invalid crate name" ;;
-  esac
   case $origin_url in
     *"$(printf '\t')"*) fail "$relative_manifest contains a tab in its origin URL" ;;
     git+*) ;;
@@ -216,9 +301,13 @@ while IFS= read -r relative_manifest; do
   printf '%s\t%s\t%s\t%s\n' \
     "$relative_manifest" "$crate_name" "$origin_url" "$old_commit" \
     >>"$manifest_inventory"
-done <"$manifest_list"
+done <"$development_candidates"
 
 if [ -z "$selected_crates" ]; then
+  if [ ! -s "$manifest_inventory" ]; then
+    printf '%s\n' "No active development manifests remain."
+    exit 0
+  fi
   awk -F '\t' '{ print $3 }' "$manifest_inventory" | \
     LC_ALL=C sort -u >"$selected_origins"
 else
@@ -230,14 +319,24 @@ else
       }
       END { if (!found) exit 1 }
     ' "$manifest_inventory" >>"$selected_origins"; then
-      fail "no development manifest is named $requested_crate"
+      if awk -F '\t' -v crate="$requested_crate" \
+        '$2 == crate { found = 1 } END { exit !found }' \
+        "$catalog_inventory"; then
+        printf '%s\n' \
+          "Ignoring $requested_crate: no active development manifest remains."
+      else
+        fail "no release manifest is named $requested_crate"
+      fi
     fi
   done
+  if [ ! -s "$selected_origins" ]; then
+    printf '%s\n' "No selected crate has an active development manifest."
+    exit 0
+  fi
   LC_ALL=C sort -u "$selected_origins" >"$temporary_root/sorted-origins"
   mv "$temporary_root/sorted-origins" "$selected_origins"
 fi
 
-tab=$(printf '\t')
 while IFS="$tab" read -r \
   relative_manifest crate_name origin_url old_commit; do
   if ! awk -v origin="$origin_url" \

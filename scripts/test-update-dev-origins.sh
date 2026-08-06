@@ -77,6 +77,12 @@ make_manifest \
   "$index_seed/index/al/alpha/alpha-0.1.0-dev.toml" \
   alpha 0.1.0-dev "$alpha_remote"
 make_manifest \
+  "$index_seed/index/al/alpha/alpha-0.0.9-dev.toml" \
+  alpha 0.0.9-dev "$alpha_remote"
+make_manifest \
+  "$index_seed/index/al/alpha/alpha-0.2.0-dev.toml" \
+  alpha 0.2.0-dev "$alpha_remote"
+make_manifest \
   "$index_seed/index/al/alpha_extra/alpha_extra-0.1.0-dev.toml" \
   alpha_extra 0.1.0-dev "$alpha_remote"
 make_manifest \
@@ -85,6 +91,12 @@ make_manifest \
 make_manifest \
   "$index_seed/index/al/alpha/alpha-0.1.0.toml" \
   alpha 0.1.0 "$alpha_remote"
+make_manifest \
+  "$index_seed/index/re/released/released-0.9.0-dev.toml" \
+  released 0.9.0-dev "$beta_remote"
+make_manifest \
+  "$index_seed/index/re/released/released-0.10.0.toml" \
+  released 0.10.0 "$beta_remote"
 git -C "$index_seed" add .
 git -C "$index_seed" commit -q -m 'Create fixture index'
 git -C "$index_seed" remote add origin "$index_remote"
@@ -109,9 +121,16 @@ ALR=$fake_alr ALR_LOG=$alr_log \
   "$index_work/scripts/update-dev-origins.sh" --crate missing \
   >"$temporary_root/missing.stdout" 2>"$temporary_root/missing.stderr" && \
   fail "unknown crate selector was accepted"
-grep -F 'no development manifest is named missing' \
+grep -F 'no release manifest is named missing' \
   "$temporary_root/missing.stderr" >/dev/null || \
   fail "unknown crate selector failure was not explained"
+
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$index_work/scripts/update-dev-origins.sh" --crate released \
+  >"$temporary_root/released.stdout"
+grep -F 'no active development manifest remains' \
+  "$temporary_root/released.stdout" >/dev/null || \
+  fail "retired development selector was not explained"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
   "$index_work/scripts/update-dev-origins.sh" --crate alpha_extra --push
@@ -119,10 +138,17 @@ ALR=$fake_alr ALR_LOG=$alr_log \
 [ -f "$index_work/REMOTE.md" ] || \
   fail "stale index checkout was not fast-forwarded"
 for manifest in \
-  index/al/alpha/alpha-0.1.0-dev.toml \
+  index/al/alpha/alpha-0.2.0-dev.toml \
   index/al/alpha_extra/alpha_extra-0.1.0-dev.toml; do
   grep -F "commit = \"$alpha_head\"" "$index_work/$manifest" >/dev/null || \
     fail "$manifest did not use alpha's remote HEAD"
+done
+for manifest in \
+  index/al/alpha/alpha-0.0.9-dev.toml \
+  index/al/alpha/alpha-0.1.0-dev.toml; do
+  grep -F 'commit = "0000000000000000000000000000000000000000"' \
+    "$index_work/$manifest" >/dev/null || \
+    fail "$manifest was not retired by stable alpha 0.1.0"
 done
 grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
@@ -139,12 +165,18 @@ ALR=$fake_alr ALR_LOG=$alr_log \
 grep -F "commit = \"$beta_head\"" \
   "$all_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
   fail "unfiltered update did not advance beta's remote HEAD"
+grep -F 'commit = "0000000000000000000000000000000000000000"' \
+  "$all_work/index/re/released/released-0.9.0-dev.toml" >/dev/null || \
+  fail "unfiltered update advanced a retired development manifest"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
   "$index_work/scripts/update-dev-origins.sh" --crate=beta --commit
 grep -F "commit = \"$beta_head\"" \
   "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
   fail "selected beta development manifest did not use beta's remote HEAD"
+grep -F 'commit = "0000000000000000000000000000000000000000"' \
+  "$index_work/index/re/released/released-0.9.0-dev.toml" >/dev/null || \
+  fail "shared-origin selection advanced a retired development manifest"
 grep -F 'index --check' "$alr_log" >/dev/null || \
   fail "Alire index validation was not run"
 [ -z "$(git -C "$index_work" status --porcelain)" ] || \
