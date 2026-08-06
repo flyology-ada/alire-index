@@ -63,6 +63,7 @@ Run the updater's isolated local-remote test with:
 
 - `flyology` `0.1.0-dev`
 - `flyology_http` `0.1.0-dev`
+- `flyology_iri` `0.1.0-dev`
 - `flyology_postgres` `0.1.0-dev`
 - `flyology_postgres_sql_core` `0.1.0-dev`
 - `flyology_postgres_sql_v14` `0.1.0-dev`

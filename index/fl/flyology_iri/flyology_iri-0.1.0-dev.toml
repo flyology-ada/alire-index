@@ -1,17 +1,14 @@
-name = "flyology_http"
-description = "HTTP client and server library for Flyology tasks"
+name = "flyology_iri"
+description = "Allocation-conscious URI, IRI, and URL reference parser"
 version = "0.1.0-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
 maintainers-logins = ["yrashk"]
 licenses = "MIT OR Apache-2.0"
-website = "https://http.flyology.org/"
-tags = ["ada", "http", "client", "server", "websocket", "sse"]
-project-files = ["flyology_http.gpr"]
-
-[[depends-on]]
-flyology = "~0.1.0-dev"
+website = "https://http.flyology.org/guide/iri/"
+tags = ["ada", "uri", "iri", "url", "parser"]
+project-files = ["flyology_iri.gpr"]
 
 [[actions]]
 type = "test"
@@ -19,4 +16,5 @@ command = ["./scripts/test.sh"]
 
 [origin]
 commit = "9c5920b2e58c71867aa293e17da6422db8b4444c"
+subdir = "flyology_iri"
 url = "git+https://github.com/flyology-ada/flyology-http.git"
