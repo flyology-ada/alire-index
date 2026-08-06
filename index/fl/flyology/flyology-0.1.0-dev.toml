@@ -30,5 +30,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "4b08d2c9dc5e45cf7705ca10e6e603a18609beba"
+commit = "58cb2d7080fb7e9897d42b7a848e1a27e068073e"
 url = "git+https://github.com/flyology-ada/flyology.git"
