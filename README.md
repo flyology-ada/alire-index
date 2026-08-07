@@ -16,6 +16,23 @@ alr index --add=git+https://github.com/flyology-ada/alire-index.git \
 The repository's default branch is `main`. Release origins remain pinned to
 exact source commits so an indexed version does not change after publication.
 
+## Patched GNAT toolchains
+
+The index imports `gnat_flyology_native` manifests from immutable
+[`flyology-ada/gnat-patches`](https://github.com/flyology-ada/gnat-patches/releases)
+releases. The importer verifies the release tag, exact three-platform origin
+set, release-asset URLs, and checksum sidecars before running `alr index
+--check` and committing a new compiler version. It runs hourly and can also be
+dispatched manually. Existing compiler manifests are immutable; changed
+release content fails closed.
+
+Select an indexed patched compiler by its GCC and patchset version:
+
+```sh
+alr -n toolchain --select \
+  gnat_flyology_native=16.1.0-patchset.1.0.0
+```
+
 ## Updating development origins
 
 Run the updater from a clean `main` checkout to advance every active

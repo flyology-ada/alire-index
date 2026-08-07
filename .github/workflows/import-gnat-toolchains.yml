@@ -1,0 +1,46 @@
+name: Import GNAT toolchains
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-gnat-toolchains
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: alire-project/setup-alire@fc4c8ce471aa30b3af0d39ce15add1ee9eaf28f2 # v6.0.0
+        with:
+          version: 2.1.1
+      - name: Import immutable release manifests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/import-gnat-toolchains.py
+      - name: Validate complete index
+        run: |
+          alr index --add=. --name=flyology
+          alr index --check
+      - name: Commit new toolchains
+        run: |
+          if git diff --quiet -- index/gn/gnat_flyology_native; then
+            echo "No new GNAT toolchains"
+            exit 0
+          fi
+          git config user.name "flyology index automation"
+          git config user.email "yrashk@users.noreply.github.com"
+          git add index/gn/gnat_flyology_native
+          git commit \
+            -m "Problem: released Flyology GNAT toolchains are not indexed" \
+            -m "Validated patchset releases remain undiscoverable to Alire users until their immutable native compiler manifests enter this index." \
+            -m "Solution: import validated gnat_flyology_native manifests" \
+            -m "Record the released Linux x86-64, Linux AArch64, and macOS AArch64 compiler origins and checksums."
+          git push origin main
