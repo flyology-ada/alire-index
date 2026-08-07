@@ -31,13 +31,13 @@ jobs:
           alr index --check
       - name: Commit new toolchains
         run: |
-          if git diff --quiet -- index/gn/gnat_flyology_native; then
+          git add index/gn/gnat_flyology_native
+          if git diff --cached --quiet -- index/gn/gnat_flyology_native; then
             echo "No new GNAT toolchains"
             exit 0
           fi
           git config user.name "flyology index automation"
           git config user.email "yrashk@users.noreply.github.com"
-          git add index/gn/gnat_flyology_native
           git commit \
             -m "Problem: released Flyology GNAT toolchains are not indexed" \
             -m "Validated patchset releases remain undiscoverable to Alire users until their immutable native compiler manifests enter this index." \
