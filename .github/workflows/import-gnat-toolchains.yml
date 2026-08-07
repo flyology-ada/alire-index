@@ -31,7 +31,7 @@ jobs:
           alr index --check
       - name: Commit new toolchains
         run: |
-          git add index/gn/gnat_flyology_native
+          git add --all -- index
           if git diff --cached --quiet -- index/gn/gnat_flyology_native; then
             echo "No new GNAT toolchains"
             exit 0
