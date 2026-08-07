@@ -18,6 +18,6 @@ flyology_postgres_sql_v17 = "~0.1.0-dev"
 flyology_postgres_sql_v18 = "~0.1.0-dev"
 
 [origin]
-commit = "92e6296ad5043348315892bd1238f48175e486ce"
+commit = "ed7b407f41232703d3de37b94989ca798d854e58"
 subdir = "sql"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"
