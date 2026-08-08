@@ -1,0 +1,40 @@
+name = "gnat_flyology_native"
+version = "16.1.0-patchset.1.0.1"
+provides = ["gnat=16.1.0"]
+description = "GNAT native compiler with a validated gnat-patches aggregate"
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "GPL-3.0-or-later AND GPL-3.0-or-later WITH GCC-exception-3.1"
+website = "https://github.com/flyology-ada/gnat-patches"
+
+auto-gpr-with = false
+
+[configuration]
+disabled = true
+
+[environment."case(os)".linux]
+PATH.prepend = "${CRATE_ROOT}/bin"
+LIBRARY_PATH.prepend = "${CRATE_ROOT}/lib64"
+LD_LIBRARY_PATH.prepend = "${CRATE_ROOT}/lib64"
+LD_RUN_PATH.prepend = "${CRATE_ROOT}/lib64"
+
+[environment."case(os)".macos]
+PATH.prepend = "${CRATE_ROOT}/bin"
+DYLD_LIBRARY_PATH.prepend = "${CRATE_ROOT}/lib"
+LD_LIBRARY_PATH.prepend = "${CRATE_ROOT}/lib"
+LD_RUN_PATH.prepend = "${CRATE_ROOT}/lib"
+
+[origin."case(os)".linux."case(host-arch)".x86-64]
+binary = true
+url = "https://github.com/flyology-ada/gnat-patches/releases/download/patchset-1.0.1-gcc-16/gnat-flyology-native-gcc-16.1.0-patchset-1.0.1-linux-x86_64.tar.gz"
+hashes = ["sha256:3671df95c24d53b3f560a0b33f4e3123b79f00a3252aa742bbde6c470810ff8e"]
+
+[origin."case(os)".linux."case(host-arch)".aarch64]
+binary = true
+url = "https://github.com/flyology-ada/gnat-patches/releases/download/patchset-1.0.1-gcc-16/gnat-flyology-native-gcc-16.1.0-patchset-1.0.1-linux-aarch64.tar.gz"
+hashes = ["sha256:dea00f266fcd17030d1045e77e6081657a492d0601ed03a3b976843c82f8a704"]
+
+[origin."case(os)".macos."case(host-arch)".aarch64]
+binary = true
+url = "https://github.com/flyology-ada/gnat-patches/releases/download/patchset-1.0.1-gcc-16/gnat-flyology-native-gcc-16.1.0-patchset-1.0.1-macos-aarch64.tar.gz"
+hashes = ["sha256:8d9f07735d488cff2c0111f125e77591f88bcdfb9ab7b4bf2b64266eadf0e87f"]
