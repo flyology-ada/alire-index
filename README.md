@@ -91,3 +91,4 @@ Run the updater's isolated local-remote test with:
 - `flyology_postgres_sql_v17` `0.1.0-dev`
 - `flyology_postgres_sql_v18` `0.1.0-dev`
 - `flyology_postgres_sql` `0.1.0-dev`
+- `flyology_tui` `0.1.0-dev`
