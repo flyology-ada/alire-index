@@ -22,7 +22,7 @@ FLYOLOGY_ROOT.set = "${CRATE_ROOT}"
 GPR_CONFIG.set = "${CRATE_ROOT}/build/flyology.cgpr"
 
 [[actions]]
-type = "post-fetch"
+type = "pre-build"
 command = ["./scripts/prepare-alire-rts.sh"]
 
 [[actions]]
@@ -30,5 +30,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "a6a6f0b2f25c5660c267fca817d25143534492f5"
+commit = "ade78308781806de7fcbde20fc8e7b9ffe1b4f12"
 url = "git+https://github.com/flyology-ada/flyology.git"
