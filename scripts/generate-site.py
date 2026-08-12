@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tomllib
 from collections import defaultdict
@@ -21,6 +22,9 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_URL = "https://crates.flyology.org/"
 SCHEMA_VERSION = 2
+CHANGE_HISTORY_LIMIT = 200
+HOME_CHANGE_LIMIT = 6
+REPOSITORY_URL = "https://github.com/flyology-ada/alire-index"
 
 
 def json_value(value: Any) -> Any:
@@ -123,6 +127,202 @@ def load_catalog(source: Path) -> dict[str, Any]:
         "index": index_metadata,
         "packages": packages,
     }
+
+
+def git_output(repository: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout
+
+
+def manifest_at(repository: Path, revision: str, path: str) -> dict[str, Any] | None:
+    raw = git_output(repository, "show", f"{revision}:{path}")
+    if raw is None:
+        return None
+    try:
+        return json_value(tomllib.loads(raw))
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+def dependency_map(manifest: dict[str, Any]) -> dict[str, str]:
+    dependencies: dict[str, str] = {}
+    for group in manifest.get("depends-on", []):
+        for name, constraint in group.items():
+            dependencies[name] = text(constraint)
+    return dependencies
+
+
+def dependency_changes(
+    before: dict[str, Any] | None, after: dict[str, Any]
+) -> list[dict[str, str]]:
+    previous = dependency_map(before or {})
+    current = dependency_map(after)
+    changes = []
+    for name in sorted(previous.keys() | current.keys()):
+        if name not in previous:
+            changes.append({"kind": "added", "name": name, "after": current[name]})
+        elif name not in current:
+            changes.append({"kind": "removed", "name": name, "before": previous[name]})
+        elif previous[name] != current[name]:
+            changes.append(
+                {
+                    "kind": "changed",
+                    "name": name,
+                    "before": previous[name],
+                    "after": current[name],
+                }
+            )
+    return changes
+
+
+def source_revision(manifest: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    origin = (manifest or {}).get("origin")
+    if not isinstance(origin, dict):
+        return None, None
+    url = origin.get("url")
+    commit = origin.get("commit")
+    return (str(url) if url else None, str(commit) if commit else None)
+
+
+def source_web_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    web_url = url.removeprefix("git+")
+    return web_url.removesuffix(".git")
+
+
+def solution_summary(message: str, subject: str) -> str:
+    for line in message.splitlines():
+        if line.startswith("Solution:"):
+            return line.removeprefix("Solution:").strip()
+    return subject.removeprefix("Problem:").strip()
+
+
+def change_entry(
+    status: str,
+    path: str,
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+) -> dict[str, Any] | None:
+    try:
+        name = str(after["name"])
+        version = str(after["version"])
+    except KeyError:
+        return None
+    development = is_development_version(version)
+    if status == "A":
+        kind = "published"
+    elif development:
+        kind = "development"
+    else:
+        kind = "manifest"
+    before_url, before_revision = source_revision(before)
+    after_url, after_revision = source_revision(after)
+    changed_fields = (
+        []
+        if status == "A"
+        else sorted(
+            key
+            for key in (before or {}).keys() | after.keys()
+            if (before or {}).get(key) != after.get(key)
+        )
+    )
+    return {
+        "kind": kind,
+        "name": name,
+        "version": version,
+        "development": development,
+        "description": after.get("description", "No description provided."),
+        "path": path,
+        "manifest": after,
+        "changed_fields": changed_fields,
+        "dependency_changes": dependency_changes(before, after),
+        "before_source_url": before_url,
+        "before_revision": before_revision,
+        "source_url": after_url,
+        "revision": after_revision,
+    }
+
+
+def load_change_history(
+    catalog: dict[str, Any], repository: Path = ROOT
+) -> list[dict[str, Any]]:
+    manifest_paths = sorted(
+        release["path"]
+        for package in catalog["packages"]
+        for release in package["versions"]
+    )
+    if not manifest_paths:
+        return []
+    log = git_output(
+        repository,
+        "log",
+        f"--max-count={CHANGE_HISTORY_LIMIT}",
+        "--format=%H%x09%cI%x09%s",
+        "--",
+        *manifest_paths,
+    )
+    if not log:
+        return []
+    history = []
+    current_paths = set(manifest_paths)
+    for line in log.splitlines():
+        try:
+            commit, timestamp, subject = line.split("\t", 2)
+        except ValueError:
+            continue
+        parent = git_output(repository, "rev-parse", f"{commit}^")
+        if not parent:
+            continue
+        parent = parent.strip()
+        diff = git_output(
+            repository,
+            "diff",
+            "--name-status",
+            "--diff-filter=AM",
+            parent,
+            commit,
+            "--",
+            *manifest_paths,
+        )
+        if not diff:
+            continue
+        entries = []
+        for changed in diff.splitlines():
+            try:
+                status, path = changed.split("\t", 1)
+            except ValueError:
+                continue
+            if path not in current_paths:
+                continue
+            after = manifest_at(repository, commit, path)
+            if after is None:
+                continue
+            before = manifest_at(repository, parent, path) if status == "M" else None
+            entry = change_entry(status, path, before, after)
+            if entry is not None:
+                entries.append(entry)
+        if not entries:
+            continue
+        message = git_output(repository, "show", "-s", "--format=%B", commit) or subject
+        history.append(
+            {
+                "commit": commit,
+                "timestamp": timestamp,
+                "subject": subject,
+                "summary": solution_summary(message, subject),
+                "entries": sorted(entries, key=lambda entry: (entry["name"], version_key(entry["version"]))),
+            }
+        )
+    return history
 
 
 def text(value: Any) -> str:
@@ -305,7 +505,168 @@ def render_package(package: dict[str, Any]) -> str:
     </details>"""
 
 
-def render_html(catalog: dict[str, Any]) -> str:
+def change_kind_label(kind: str) -> str:
+    return {
+        "published": "New version",
+        "development": "Development update",
+        "manifest": "Manifest update",
+    }[kind]
+
+
+def change_date_label(timestamp: str) -> str:
+    try:
+        instant = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return timestamp[:10]
+    return f"{instant.strftime('%b')} {instant.day}, {instant.year}"
+
+
+def source_link(url: str | None, revision: str | None, label: str) -> str:
+    web_url = source_web_url(url)
+    if web_url and revision:
+        return f'<a href="{html.escape(f"{web_url}/commit/{revision}", quote=True)}"><code>{html.escape(label)}</code></a>'
+    if revision:
+        return f"<code>{html.escape(label)}</code>"
+    return '<span class="quiet">Not applicable</span>'
+
+
+def render_dependency_changes(changes: list[dict[str, str]]) -> str:
+    if not changes:
+        return ""
+    items = []
+    for change in changes:
+        name = f'<code>{html.escape(change["name"])}</code>'
+        if change["kind"] == "added":
+            detail = f'Added {name} <code>{html.escape(change["after"])}</code>'
+        elif change["kind"] == "removed":
+            detail = f'Removed {name} <code>{html.escape(change["before"])}</code>'
+        else:
+            detail = (
+                f'{name} <code>{html.escape(change["before"])}</code>'
+                f'<span aria-hidden="true">→</span><span class="visually-hidden"> changed to </span>'
+                f'<code>{html.escape(change["after"])}</code>'
+            )
+        items.append(f'<li class="dependency-change-{change["kind"]}">{detail}</li>')
+    return f'<div class="change-dependencies"><h4>Dependency changes</h4><ul>{"".join(items)}</ul></div>'
+
+
+def render_change_entry(entry: dict[str, Any], *, root_prefix: str, detailed: bool) -> str:
+    name = segment(entry["name"])
+    version = segment(entry["version"])
+    label = change_kind_label(entry["kind"])
+    crate_href = f'{root_prefix}crates/{name}/{version}/'
+    fields = ", ".join(entry["changed_fields"])
+    before_revision = entry["before_revision"]
+    revision = entry["revision"]
+    if entry["kind"] == "development" and before_revision and revision:
+        concise = (
+            f'{source_link(entry["before_source_url"], before_revision, before_revision[:8])}'
+            f'<span aria-hidden="true">→</span><span class="visually-hidden"> updated to </span>'
+            f'{source_link(entry["source_url"], revision, revision[:8])}'
+        )
+    elif entry["kind"] == "published":
+        concise = "Version added to the index"
+    else:
+        concise = f"Changed {html.escape(fields)}" if fields else "Manifest metadata changed"
+    details = ""
+    if detailed:
+        facts = []
+        if entry["kind"] == "published":
+            facts.append(f'<div><dt>Origin</dt><dd>{html.escape(origin_summary(entry["manifest"]))}</dd></div>')
+        elif before_revision or revision:
+            facts.append(f'<div><dt>Source revision</dt><dd class="change-revisions">{concise}</dd></div>')
+        if fields:
+            facts.append(f'<div><dt>Manifest fields</dt><dd>{html.escape(fields)}</dd></div>')
+        facts.append(
+            f'<div><dt>Manifest</dt><dd><a href="{REPOSITORY_URL}/blob/main/{html.escape(entry["path"], quote=True)}"><code>{html.escape(entry["path"])}</code></a></dd></div>'
+        )
+        comparison = ""
+        before_web = source_web_url(entry["before_source_url"])
+        after_web = source_web_url(entry["source_url"])
+        if before_web and before_web == after_web and before_revision and revision:
+            compare_href = f"{after_web}/compare/{before_revision}...{revision}"
+            comparison = f'<a class="change-compare" href="{html.escape(compare_href, quote=True)}">Compare source revisions</a>'
+        details = f"""
+          <p class="change-description">{html.escape(entry['description'])}</p>
+          <dl class="change-facts">{"".join(facts)}</dl>
+          {render_dependency_changes(entry['dependency_changes'])}
+          {comparison}"""
+    return f"""
+      <article class="change-entry change-entry-{html.escape(entry['kind'])}">
+        <div class="change-entry-heading">
+          <span class="change-kind">{html.escape(label)}</span>
+          <h3><a href="{html.escape(crate_href, quote=True)}">{html.escape(entry['name'])} <code>{html.escape(entry['version'])}</code></a></h3>
+        </div>
+        <div class="change-entry-summary">{concise}</div>
+        {details}
+      </article>"""
+
+
+def render_change_preview(history: list[dict[str, Any]]) -> str:
+    all_entries = []
+    for group in history:
+        for entry in group["entries"]:
+            all_entries.append((group, entry))
+    recent = all_entries[:HOME_CHANGE_LIMIT]
+    for required_kind in ("published", "development"):
+        if any(entry["kind"] == required_kind for _group, entry in recent):
+            continue
+        replacement = next(
+            (item for item in all_entries[HOME_CHANGE_LIMIT:] if item[1]["kind"] == required_kind),
+            None,
+        )
+        if replacement and recent:
+            recent[-1] = replacement
+    if not recent:
+        return ""
+    rows = []
+    for group, entry in recent:
+        rows.append(
+            f'<li><time datetime="{html.escape(group["timestamp"], quote=True)}">{html.escape(change_date_label(group["timestamp"]))}</time>'
+            f'{render_change_entry(entry, root_prefix="", detailed=False)}</li>'
+        )
+    return f"""
+      <section class="changes-preview page-shell" aria-labelledby="changes-preview-title">
+        <div class="changes-heading">
+          <div><p class="eyebrow">Index activity</p><h2 id="changes-preview-title">Recent changes.</h2></div>
+          <p>Newly published versions and advances to development source pins.</p>
+        </div>
+        <ol class="change-preview-list">{"".join(rows)}</ol>
+        <a class="text-link" href="changes/">View the detailed change history <span aria-hidden="true">→</span></a>
+      </section>"""
+
+
+def render_site_header(root_prefix: str, current: str) -> str:
+    package_current = ' aria-current="page"' if current == "packages" else ""
+    changes_current = ' aria-current="page"' if current == "changes" else ""
+    return f"""
+    <header class="site-header">
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a class="brand" href="{root_prefix}" aria-label="Flyology Crate Index home">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="3" fill="currentColor"/></svg>
+          <span>Flyology Crates</span>
+        </a>
+        <ul class="nav-links" data-nav-links>
+          <li><a href="{root_prefix}#catalog"{package_current}>Packages</a></li>
+          <li><a href="{root_prefix}changes/"{changes_current}>Changes</a></li>
+          <li><a href="{root_prefix}crates.json" download>JSON</a></li>
+          <li><a href="https://github.com/flyology-ada/alire-index">GitHub</a></li>
+        </ul>
+        <div class="nav-tools">
+          <button class="icon-button" type="button" data-theme-toggle>
+            <span class="visually-hidden" data-theme-label>Use dark theme</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+          </button>
+          <button class="menu-button" type="button" data-menu-toggle aria-expanded="false">
+            <span class="visually-hidden">Toggle navigation</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+        </div>
+      </nav>
+    </header>"""
+
+
+def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     packages = catalog["packages"]
     manifest_count = sum(len(package["versions"]) for package in packages)
     source_count = sum(package_kind(package["versions"][0]["manifest"]) == "source" for package in packages)
@@ -328,29 +689,7 @@ def render_html(catalog: dict[str, Any]) -> str:
   </head>
   <body>
     <a class="skip-link" href="#catalog">Skip to crate catalog</a>
-    <header class="site-header">
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a class="brand" href="./" aria-label="Flyology Crate Index home">
-          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="3" fill="currentColor"/></svg>
-          <span>Flyology Crates</span>
-        </a>
-        <ul class="nav-links" data-nav-links>
-          <li><a href="#catalog" aria-current="page">Packages</a></li>
-          <li><a href="crates.json" download>JSON</a></li>
-          <li><a href="https://github.com/flyology-ada/alire-index">GitHub</a></li>
-        </ul>
-        <div class="nav-tools">
-          <button class="icon-button" type="button" data-theme-toggle>
-            <span class="visually-hidden" data-theme-label>Use dark theme</span>
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
-          </button>
-          <button class="menu-button" type="button" data-menu-toggle aria-expanded="false">
-            <span class="visually-hidden">Toggle navigation</span>
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-          </button>
-        </div>
-      </nav>
-    </header>
+    {render_site_header('./', 'packages')}
     <main>
       <section class="catalog-hero page-shell" aria-labelledby="page-title">
         <div>
@@ -379,6 +718,7 @@ def render_html(catalog: dict[str, Any]) -> str:
           <p><strong>v{html.escape(str(catalog['index'].get('version', 'unknown')))}</strong> index format</p>
         </div>
       </div>
+      {render_change_preview(history)}
       <section class="catalog page-shell" id="catalog" aria-labelledby="catalog-title" data-catalog>
         <div class="catalog-heading">
           <div>
@@ -422,30 +762,82 @@ def render_html(catalog: dict[str, Any]) -> str:
 
 
 def render_detail_header(root_prefix: str) -> str:
-    return f"""
-    <header class="site-header">
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a class="brand" href="{root_prefix}" aria-label="Flyology Crate Index home">
-          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="3" fill="currentColor"/></svg>
-          <span>Flyology Crates</span>
-        </a>
-        <ul class="nav-links" data-nav-links>
-          <li><a href="{root_prefix}#catalog" aria-current="page">Packages</a></li>
-          <li><a href="{root_prefix}crates.json" download>JSON</a></li>
-          <li><a href="https://github.com/flyology-ada/alire-index">GitHub</a></li>
-        </ul>
-        <div class="nav-tools">
-          <button class="icon-button" type="button" data-theme-toggle>
-            <span class="visually-hidden" data-theme-label>Use dark theme</span>
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
-          </button>
-          <button class="menu-button" type="button" data-menu-toggle aria-expanded="false">
-            <span class="visually-hidden">Toggle navigation</span>
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-          </button>
-        </div>
-      </nav>
-    </header>"""
+    return render_site_header(root_prefix, "packages")
+
+
+def render_changes_page(history: list[dict[str, Any]]) -> str:
+    change_count = sum(len(group["entries"]) for group in history)
+    published_count = sum(
+        entry["kind"] == "published" for group in history for entry in group["entries"]
+    )
+    development_count = sum(
+        entry["kind"] == "development" for group in history for entry in group["entries"]
+    )
+    groups = []
+    for group in history:
+        entries = "".join(
+            render_change_entry(entry, root_prefix="../", detailed=True)
+            for entry in group["entries"]
+        )
+        groups.append(
+            f"""
+        <li class="change-group">
+          <header class="change-group-heading">
+            <time datetime="{html.escape(group['timestamp'], quote=True)}">{html.escape(change_date_label(group['timestamp']))}</time>
+            <div>
+              <h2>{html.escape(group['summary'])}</h2>
+              <a href="{REPOSITORY_URL}/commit/{html.escape(group['commit'], quote=True)}"><code>{html.escape(group['commit'][:8])}</code> on GitHub</a>
+            </div>
+          </header>
+          <div class="change-group-entries">{entries}</div>
+        </li>"""
+        )
+    history_html = (
+        f'<ol class="change-history">{"".join(groups)}</ol>'
+        if groups
+        else '<div class="empty-state"><h2>No recorded changes</h2><p>Git history was unavailable when this site was generated.</p></div>'
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Newly published versions and development manifest updates in the Flyology Alire index.">
+    <meta name="theme-color" content="#17213d">
+    <title>Index changes · Flyology Crates</title>
+    <link rel="canonical" href="{CANONICAL_URL}changes/">
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="../assets/styles/site.css">
+    <link rel="stylesheet" href="../assets/styles/index.css">
+    <script src="../assets/scripts/ada-highlight.js"></script>
+    <script src="../assets/scripts/site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to change history</a>
+    {render_site_header('../', 'changes')}
+    <main class="changes-page page-shell" id="main">
+      <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="../">Index</a><span aria-hidden="true">/</span><span aria-current="page">Changes</span></nav>
+      <header class="changes-hero">
+        <p class="eyebrow">Index activity</p>
+        <h1>Index changes.</h1>
+        <p>New versions and development source advances, derived from the repository history for packages currently in the index.</p>
+      </header>
+      <div class="change-stats" aria-label="Change history summary">
+        <p><strong>{change_count}</strong> manifest changes</p>
+        <p><strong>{published_count}</strong> new versions</p>
+        <p><strong>{development_count}</strong> development updates</p>
+      </div>
+      {history_html}
+    </main>
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <p>Generated from the <a href="{REPOSITORY_URL}">Flyology Alire index</a>.</p>
+        <div class="footer-links"><a href="../">Package index</a><a href="../crates.json">Aggregate JSON</a></div>
+      </div>
+    </footer>
+  </body>
+</html>
+"""
 
 
 def render_detail_footer(root_prefix: str, package: dict[str, Any]) -> str:
@@ -545,6 +937,26 @@ INDEX_CSS = r"""
 .catalog-stats p:first-child { padding-left: 0; }
 .catalog-stats p:last-child { border-right: 0; }
 .catalog-stats strong { display: block; color: var(--ink); font: 620 1rem var(--font-mono); }
+.changes-preview { padding-block: clamp(4.5rem, 8vw, 7rem); border-bottom: 1px solid var(--line); }
+.changes-heading { display: grid; grid-template-columns: minmax(0, .9fr) minmax(18rem, .55fr); align-items: end; margin-bottom: 2.5rem; gap: 3rem; }
+.changes-heading h2 { max-width: 12ch; margin-bottom: 0; }
+.changes-heading > p { max-width: 48ch; margin: 0 0 .3rem; color: var(--ink-soft); }
+.change-preview-list, .change-history { margin: 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
+.change-preview-list > li { display: grid; grid-template-columns: 8rem minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--line); }
+.change-preview-list > li > time, .change-group-heading > time { color: var(--ink-soft); font: .7rem var(--font-mono); white-space: nowrap; }
+.change-preview-list .change-entry { display: grid; grid-template-columns: minmax(16rem, .72fr) minmax(12rem, 1fr); align-items: center; min-height: 5rem; padding: .9rem .2rem; gap: 1.4rem; }
+.change-entry-heading { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem .8rem; }
+.change-entry-heading h3 { margin: 0; font-size: .9rem; letter-spacing: -.015em; }
+.change-entry-heading h3 a { color: var(--ink); text-decoration: none; }
+.change-entry-heading h3 a:hover { color: var(--violet-deep); }
+.change-entry-heading h3 code { margin-left: .25rem; color: var(--violet-deep); font-size: .7rem; font-weight: 400; }
+.change-kind { display: inline-flex; align-items: center; padding: .17rem .46rem; border: 1px solid currentColor; border-radius: 999px; font-size: .6rem; font-weight: 650; letter-spacing: .025em; white-space: nowrap; }
+.change-entry-published .change-kind { background: color-mix(in oklch, var(--teal) 10%, var(--paper)); color: var(--teal-deep); }
+.change-entry-development .change-kind { background: color-mix(in oklch, var(--violet) 8%, var(--paper)); color: var(--violet-deep); }
+.change-entry-manifest .change-kind { background: var(--surface); color: var(--ink-soft); }
+.change-entry-summary { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; color: var(--ink-soft); font-size: .76rem; }
+.change-entry-summary code { color: var(--ink); font-size: .68rem; }
+.text-link { display: inline-flex; align-items: center; margin-top: 1.5rem; gap: .5rem; font-size: .8rem; font-weight: 620; }
 .catalog { padding-block: clamp(5.5rem, 10vw, 9rem); }
 .catalog-heading { display: grid; grid-template-columns: minmax(0, .9fr) minmax(18rem, .55fr); align-items: end; gap: 3rem; margin-bottom: 3rem; }
 .catalog-heading h2 { max-width: 12ch; margin-bottom: 0; }
@@ -615,6 +1027,36 @@ INDEX_CSS = r"""
 .crate-release-line code { color: var(--violet-deep); font-size: .9rem; }
 .detail-page-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, .34fr); align-items: start; gap: clamp(2rem, 6vw, 5rem); padding-top: 2rem; border-top: 1px solid var(--line); }
 .detail-page-layout .raw-manifest pre { max-height: none; }
+.changes-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
+.changes-hero { max-width: 58rem; padding-block: clamp(4rem, 8vw, 7rem); }
+.changes-hero h1 { max-width: 100%; margin-bottom: 1rem; font-size: clamp(2.8rem, 7vw, 6rem); }
+.changes-hero > p:not(.eyebrow) { max-width: 64ch; margin: 0; color: var(--ink-soft); font-size: 1.05rem; }
+.change-stats { display: grid; grid-template-columns: repeat(3, 1fr); border-block: 1px solid var(--line); }
+.change-stats p { margin: 0; padding: 1.1rem 1.5rem; border-right: 1px solid var(--line); color: var(--ink-soft); font-size: .74rem; }
+.change-stats p:first-child { padding-left: 0; }
+.change-stats p:last-child { border-right: 0; }
+.change-stats strong { display: block; color: var(--ink); font: 620 1rem var(--font-mono); }
+.change-history { margin-top: 4rem; }
+.change-group { padding-block: 2.2rem 3rem; border-bottom: 1px solid var(--line); }
+.change-group-heading { display: grid; grid-template-columns: 8rem minmax(0, 1fr); align-items: start; gap: 2rem; }
+.change-group-heading h2 { max-width: 34ch; margin: 0 0 .4rem; font-size: 1.25rem; letter-spacing: -.02em; }
+.change-group-heading a { font-size: .68rem; }
+.change-group-entries { margin: 1.8rem 0 0 10rem; border-top: 1px solid var(--line); }
+.change-group-entries .change-entry { padding-block: 1.4rem; border-bottom: 1px solid var(--line); }
+.change-group-entries .change-entry:last-child { border-bottom: 0; }
+.change-group-entries .change-entry-heading { margin-bottom: .5rem; }
+.change-description { max-width: 68ch; margin: .75rem 0 1rem; color: var(--ink-soft); font-size: .84rem; }
+.change-facts { display: grid; margin: 0; border-top: 1px solid var(--line); }
+.change-facts > div { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); padding: .65rem .15rem; gap: 1rem; border-bottom: 1px solid var(--line); }
+.change-facts dt { color: var(--ink-soft); font-size: .68rem; }
+.change-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font: .7rem/1.55 var(--font-mono); }
+.change-revisions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.change-dependencies { margin-top: 1.2rem; }
+.change-dependencies h4 { margin-bottom: .55rem; font-size: .75rem; }
+.change-dependencies ul { display: grid; margin: 0; padding: 0; gap: .35rem; list-style: none; }
+.change-dependencies li { display: flex; flex-wrap: wrap; align-items: center; padding: .45rem .65rem; gap: .35rem; background: var(--surface); color: var(--ink-soft); font-size: .72rem; }
+.change-dependencies li code:first-child { color: var(--ink); }
+.change-compare { display: inline-flex; margin-top: 1rem; font-size: .75rem; font-weight: 620; }
 .empty-state { padding: 4rem 1rem; border-bottom: 1px solid var(--line); text-align: center; }
 .empty-state h3 { margin-bottom: .5rem; }
 .empty-state p { color: var(--ink-soft); }
@@ -622,6 +1064,8 @@ INDEX_CSS = r"""
   .catalog-hero { grid-template-columns: 1fr; min-height: 0; }
   .install-panel { max-width: 38rem; }
   .catalog-heading { grid-template-columns: 1fr; gap: 1.2rem; }
+  .changes-heading { grid-template-columns: 1fr; gap: 1.2rem; }
+  .change-preview-list .change-entry { grid-template-columns: 1fr; gap: .5rem; }
   .catalog-controls { grid-template-columns: 1fr 1fr; }
   .expand-button { grid-column: 1 / -1; }
   .package-summary { grid-template-columns: 1fr auto; }
@@ -630,6 +1074,7 @@ INDEX_CSS = r"""
   .package-release-layout, .detail-page-layout { grid-template-columns: 1fr; }
   .metadata { grid-template-columns: 1fr; }
   .metadata div:nth-child(odd) { margin-right: 0; }
+  .change-group-entries { margin-left: 0; }
 }
 @media (max-width: 640px) {
   .catalog-stats .page-shell { grid-template-columns: repeat(2, 1fr); }
@@ -637,6 +1082,13 @@ INDEX_CSS = r"""
   .catalog-stats p:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .catalog-stats p:nth-child(3) { padding-left: 0; }
   .catalog-controls { grid-template-columns: 1fr; }
+  .change-preview-list > li, .change-group-heading { grid-template-columns: 1fr; gap: .65rem; }
+  .change-preview-list > li { padding-block: 1rem; }
+  .change-preview-list .change-entry { min-height: 0; padding-block: 0; }
+  .change-stats { grid-template-columns: 1fr; }
+  .change-stats p, .change-stats p:first-child { padding-inline: 0; border-right: 0; border-bottom: 1px solid var(--line); }
+  .change-stats p:last-child { border-bottom: 0; }
+  .change-facts > div { grid-template-columns: 1fr; gap: .3rem; }
   .expand-button { grid-column: auto; }
   .package-summary { min-height: 0; padding-block: 1.4rem; }
   .package-body { padding-inline: .35rem; }
@@ -747,11 +1199,13 @@ def write_json(path: Path, value: Any) -> None:
 
 def generate(source: Path, output: Path) -> dict[str, Any]:
     catalog = load_catalog(source)
+    history = load_change_history(catalog)
     if output.exists():
         shutil.rmtree(output)
     (output / "assets" / "styles").mkdir(parents=True)
     (output / "assets" / "scripts").mkdir(parents=True)
     (output / "crates").mkdir(parents=True)
+    (output / "changes").mkdir(parents=True)
 
     write_json(output / "crates.json", catalog)
     shared = {key: catalog[key] for key in ("schema_version", "generated_at", "canonical_url", "index")}
@@ -773,7 +1227,10 @@ def generate(source: Path, output: Path) -> dict[str, Any]:
                 encoding="utf-8",
             )
 
-    (output / "index.html").write_text(render_html(catalog), encoding="utf-8")
+    (output / "index.html").write_text(render_html(catalog, history), encoding="utf-8")
+    (output / "changes" / "index.html").write_text(
+        render_changes_page(history), encoding="utf-8"
+    )
     (output / "assets" / "styles" / "index.css").write_text(INDEX_CSS.strip() + "\n", encoding="utf-8")
     (output / "assets" / "scripts" / "index.js").write_text(INDEX_JS.strip() + "\n", encoding="utf-8")
     (output / "favicon.svg").write_text(FAVICON, encoding="utf-8")

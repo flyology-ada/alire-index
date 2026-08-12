@@ -17,13 +17,15 @@ SPEC.loader.exec_module(generate_site)
 
 
 class GenerateSiteTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.output = Path(self.temporary.name) / "site"
-        self.catalog = generate_site.generate(ROOT / "index", self.output)
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.output = Path(cls.temporary.name) / "site"
+        cls.catalog = generate_site.generate(ROOT / "index", cls.output)
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
 
     def test_aggregate_contains_every_manifest(self) -> None:
         manifest_paths = sorted((ROOT / "index").glob("*/*/*.toml"))
@@ -52,6 +54,46 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertEqual(page.count('class="raw-manifest"'), len(self.catalog["packages"]))
         development_only = sum(package["development_only"] for package in self.catalog["packages"])
         self.assertEqual(page.count("Development only"), development_only)
+
+    def test_home_page_has_a_bounded_mixed_change_preview(self) -> None:
+        page = (self.output / "index.html").read_text(encoding="utf-8")
+        self.assertIn('href="changes/"', page)
+        self.assertIn('id="changes-preview-title"', page)
+        self.assertEqual(page.count('class="change-entry '), generate_site.HOME_CHANGE_LIMIT)
+        self.assertIn("New version", page)
+        self.assertIn("Development update", page)
+
+    def test_detailed_change_history_is_generated_from_git(self) -> None:
+        page = (self.output / "changes" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<a href="../changes/" aria-current="page">Changes</a>', page)
+        self.assertIn("Index changes.", page)
+        self.assertIn("Compare source revisions", page)
+        self.assertIn("Dependency changes", page)
+        self.assertIn(f"{generate_site.REPOSITORY_URL}/commit/", page)
+
+    def test_change_entry_distinguishes_publication_and_dev_update(self) -> None:
+        before = {
+            "name": "example",
+            "version": "0.2.0-dev",
+            "depends-on": [{"base": "^1"}],
+            "origin": {"url": "git+https://github.com/example/example.git", "commit": "a" * 40},
+        }
+        after = {
+            **before,
+            "depends-on": [{"base": "^2"}, {"new_dependency": "*"}],
+            "origin": {"url": "git+https://github.com/example/example.git", "commit": "b" * 40},
+        }
+        updated = generate_site.change_entry("M", "index/ex/example/example-0.2.0-dev.toml", before, after)
+        published = generate_site.change_entry("A", "index/ex/example/example-0.2.0-dev.toml", None, after)
+        assert updated and published
+        self.assertEqual(updated["kind"], "development")
+        self.assertEqual(updated["changed_fields"], ["depends-on", "origin"])
+        self.assertEqual(
+            [(change["kind"], change["name"]) for change in updated["dependency_changes"]],
+            [("changed", "base"), ("added", "new_dependency")],
+        )
+        self.assertEqual(published["kind"], "published")
+        self.assertEqual(published["changed_fields"], [])
 
     def test_published_release_is_selected_over_newer_development(self) -> None:
         releases = [
