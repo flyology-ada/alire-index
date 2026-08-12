@@ -271,8 +271,10 @@ def render_html(catalog: dict[str, Any]) -> str:
         </div>
         <div class="install-panel">
           <div class="install-heading"><span>Configure Alire</span><span>shell</span></div>
-          <pre><code id="install-command">alr index --add=git+https://github.com/flyology-ada/alire-index.git \
-  --name=flyology --before=community</code></pre>
+          <pre><code id="install-command">alr index \\
+<span class="install-option">  --add=</span>git+https://github.com/flyology-ada/alire-index.git \\
+<span class="install-option">  --name=</span>flyology \\
+<span class="install-option">  --before=</span>community</code></pre>
           <button type="button" data-copy-install>Copy command</button>
         </div>
       </section>
@@ -332,7 +334,8 @@ INDEX_CSS = r"""
 .catalog-hero h1 { max-width: 10ch; font-size: clamp(3.2rem, 7vw, 7rem); }
 .install-panel { overflow: hidden; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); box-shadow: 0 1.7rem 4rem oklch(10% .04 270 / .22); }
 .install-heading { display: flex; justify-content: space-between; padding: .8rem 1.1rem; border-bottom: 1px solid var(--code-line); color: oklch(72% .03 270); font: .72rem var(--font-mono); }
-.install-panel pre { margin: 0; padding: 1.4rem 1.1rem; overflow-x: auto; font-size: .78rem; line-height: 1.75; }
+.install-panel pre { margin: 0; padding: 1.4rem 1.1rem; overflow-x: hidden; font-size: .78rem; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.install-option { white-space: nowrap; }
 .install-panel button { width: 100%; padding: .8rem 1.1rem; border: 0; border-top: 1px solid var(--code-line); background: oklch(28% .052 270); color: oklch(92% .02 270); font: 600 .76rem var(--font-sans); text-align: left; cursor: pointer; }
 .install-panel button:hover { background: oklch(33% .06 270); }
 .catalog-stats { border-block: 1px solid var(--line); background: var(--surface); }

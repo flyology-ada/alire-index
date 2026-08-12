@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import tempfile
 import tomllib
 import unittest
@@ -46,6 +47,17 @@ class GenerateSiteTests(unittest.TestCase):
         for package in self.catalog["packages"]:
             self.assertIn(f'>{package["name"]}</span>', page)
             self.assertIn(f'crates/{package["name"]}.json', page)
+
+    def test_install_command_has_shell_line_continuations(self) -> None:
+        page = (self.output / "index.html").read_text(encoding="utf-8")
+        command = """alr index \\
+  --add=git+https://github.com/flyology-ada/alire-index.git \\
+  --name=flyology \\
+  --before=community"""
+        page_without_option_spans = re.sub(r'</?span(?: class="install-option")?>', "", page)
+        self.assertIn(f'<code id="install-command">{command}</code>', page_without_option_spans)
+        self.assertEqual(page.count('class="install-option"'), 3)
+        self.assertNotIn(".install-panel pre { margin: 0; padding: 1.4rem 1.1rem; overflow-x: auto", page)
 
 
 if __name__ == "__main__":
