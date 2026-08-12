@@ -33,8 +33,9 @@ class GenerateSiteTests(unittest.TestCase):
 
     def test_json_preserves_the_complete_manifest(self) -> None:
         aggregate = json.loads((self.output / "crates.json").read_text(encoding="utf-8"))
+        self.assertEqual(aggregate["schema_version"], 2)
         for package in aggregate["packages"]:
-            package_file = json.loads((self.output / "crates" / f"{package['name']}.json").read_text(encoding="utf-8"))
+            package_file = json.loads((self.output / "crates" / f"{generate_site.segment(package['name'])}.json").read_text(encoding="utf-8"))
             self.assertEqual(package_file["package"], package)
             for release in package["versions"]:
                 with (ROOT / release["path"]).open("rb") as stream:
@@ -47,6 +48,40 @@ class GenerateSiteTests(unittest.TestCase):
         for package in self.catalog["packages"]:
             self.assertIn(f'>{package["name"]}</span>', page)
             self.assertIn(f'crates/{package["name"]}.json', page)
+            self.assertIn(f'crates/{package["name"]}/', page)
+        self.assertEqual(page.count('class="raw-manifest"'), len(self.catalog["packages"]))
+        development_only = sum(package["development_only"] for package in self.catalog["packages"])
+        self.assertEqual(page.count("Development only"), development_only)
+
+    def test_published_release_is_selected_over_newer_development(self) -> None:
+        releases = [
+            {"version": "0.2.0-dev"},
+            {"version": "0.1.0"},
+        ]
+        self.assertEqual(generate_site.select_release(releases)["version"], "0.1.0")
+        self.assertTrue(generate_site.is_development_version("0.2.0-dev"))
+        self.assertFalse(generate_site.is_development_version("16.1.0-patchset.1.1.0"))
+
+    def test_package_selection_records_published_and_development_status(self) -> None:
+        flyology = next(package for package in self.catalog["packages"] if package["name"] == "flyology")
+        toolchain = next(package for package in self.catalog["packages"] if package["name"] == "gnat_flyology_native")
+        self.assertEqual(flyology["selected_version"], "0.1.0-dev")
+        self.assertTrue(flyology["development_only"])
+        self.assertEqual(toolchain["selected_version"], "16.1.0-patchset.1.1.0")
+        self.assertFalse(toolchain["development_only"])
+
+    def test_crate_and_version_pages_are_generated(self) -> None:
+        for package in self.catalog["packages"]:
+            name = generate_site.segment(package["name"])
+            package_page = (self.output / "crates" / name / "index.html").read_text(encoding="utf-8")
+            self.assertIn(package["selected_version"], package_page)
+            self.assertIn('Indexed versions', package_page)
+            for release in package["versions"]:
+                version = generate_site.segment(release["version"])
+                version_page = (self.output / "crates" / name / version / "index.html").read_text(encoding="utf-8")
+                self.assertIn(f'<span aria-current="page">{release["version"]}</span>', version_page)
+                self.assertIn('Complete manifest as JSON', version_page)
+                self.assertIn(f'href="../{version}/"', version_page)
 
     def test_install_command_has_shell_line_continuations(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")

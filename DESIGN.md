@@ -47,11 +47,12 @@ wall of detached cards.
 
 ## Information hierarchy
 
-The page has three levels: an introductory band with the Alire setup command,
+The index has three levels: an introductory band with the Alire setup command,
 a search and type filter, and one semantic disclosure per crate. Each closed
-disclosure shows the crate name, current version, description, and tags. Its
-open state presents structured metadata and a second disclosure for every
-indexed version.
+disclosure shows the crate name, selected release, description, and status. Its
+open state presents that release's structured metadata and direct links to
+other versions. Dedicated crate and version routes render the complete release
+without duplicating every manifest on the front page.
 
 ## Components
 

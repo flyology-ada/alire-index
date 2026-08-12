@@ -15,11 +15,12 @@ from collections import defaultdict
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_URL = "https://crates.flyology.org/"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def json_value(value: Any) -> Any:
@@ -49,6 +50,30 @@ def version_key(version: str) -> tuple[Any, ...]:
     return numbers, not separator, prerelease_parts
 
 
+def is_development_version(version: str) -> bool:
+    """Return whether VERSION carries Alire's development prerelease label."""
+    _main, separator, prerelease = version.partition("-")
+    if not separator:
+        return False
+    return "dev" in re.split(r"[.-]", prerelease.lower())
+
+
+def select_release(releases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Prefer the newest published release, falling back to the newest dev."""
+    return next(
+        (release for release in releases if not is_development_version(release["version"])),
+        releases[0],
+    )
+
+
+def release_for(package: dict[str, Any], version: str) -> dict[str, Any]:
+    return next(release for release in package["versions"] if release["version"] == version)
+
+
+def segment(value: str) -> str:
+    return quote(value, safe="")
+
+
 def load_catalog(source: Path) -> dict[str, Any]:
     index_path = source / "index.toml"
     with index_path.open("rb") as stream:
@@ -69,6 +94,7 @@ def load_catalog(source: Path) -> dict[str, Any]:
         grouped[identity[0]].append(
             {
                 "version": identity[1],
+                "development": is_development_version(identity[1]),
                 "path": manifest_path.relative_to(ROOT).as_posix(),
                 "manifest": manifest,
             }
@@ -77,12 +103,15 @@ def load_catalog(source: Path) -> dict[str, Any]:
     packages = []
     for name, releases in sorted(grouped.items()):
         releases.sort(key=lambda release: version_key(release["version"]), reverse=True)
-        newest = releases[0]["manifest"]
+        selected = select_release(releases)
+        development_only = all(release["development"] for release in releases)
         packages.append(
             {
                 "name": name,
-                "description": newest.get("description", "No description provided."),
+                "description": selected["manifest"].get("description", "No description provided."),
                 "latest_version": releases[0]["version"],
+                "selected_version": selected["version"],
+                "development_only": development_only,
                 "versions": releases,
             }
         )
@@ -141,10 +170,16 @@ def package_kind(manifest: dict[str, Any]) -> str:
     return "toolchain" if manifest.get("provides") or manifest.get("auto-gpr-with") is False else "source"
 
 
-def render_version(package_name: str, release: dict[str, Any], open_first: bool) -> str:
+def status_badge(release: dict[str, Any], *, development_only: bool = False) -> str:
+    if not release["development"]:
+        return ""
+    label = "Development only" if development_only else "Development"
+    return f'<span class="release-status release-status-development">{label}</span>'
+
+
+def release_metadata(release: dict[str, Any]) -> str:
     manifest = release["manifest"]
-    raw = html.escape(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True))
-    metadata = "".join(
+    return "".join(
         [
             field("Authors", manifest.get("authors")),
             field("Maintainers", manifest.get("maintainers")),
@@ -156,44 +191,98 @@ def render_version(package_name: str, release: dict[str, Any], open_first: bool)
             field("Manifest", release["path"]),
         ]
     )
+
+
+def render_release_detail(
+    package_name: str,
+    release: dict[str, Any],
+    *,
+    heading_level: int,
+    raw_expanded: bool,
+) -> str:
+    manifest = release["manifest"]
+    raw = html.escape(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True))
+    heading = f"h{heading_level}"
+    child_heading = f"h{min(heading_level + 1, 6)}"
     return f"""
-      <details class="version"{' open' if open_first else ''}>
-        <summary>
-          <span>{html.escape(release['version'])}</span>
-          <span>{html.escape(release['path'])}</span>
-        </summary>
-        <div class="version-body">
-          <dl class="metadata">{metadata}</dl>
-          <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
-            <h4 id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</h4>
-            {dependency_rows(manifest)}
-          </section>
-          <details class="raw-manifest">
-            <summary>Complete manifest as JSON</summary>
-            <pre><code>{raw}</code></pre>
-          </details>
+      <section class="release-detail" aria-labelledby="release-{html.escape(package_name)}-{html.escape(release['version'])}">
+        <div class="release-heading">
+          <{heading} id="release-{html.escape(package_name)}-{html.escape(release['version'])}">{html.escape(release['version'])}</{heading}>
+          {status_badge(release)}
         </div>
-      </details>"""
+        <dl class="metadata">{release_metadata(release)}</dl>
+        <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
+          <{child_heading} id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</{child_heading}>
+          {dependency_rows(manifest)}
+        </section>
+        <details class="raw-manifest"{' open' if raw_expanded else ''}>
+          <summary>Complete manifest as JSON</summary>
+          <pre><code>{raw}</code></pre>
+        </details>
+      </section>"""
+
+
+def version_href(package: dict[str, Any], release: dict[str, Any], context: str) -> str:
+    name = segment(package["name"])
+    version = segment(release["version"])
+    if context == "home":
+        return f"crates/{name}/{version}/"
+    if context == "package":
+        return f"{version}/"
+    if context == "version":
+        return f"../{version}/"
+    raise ValueError(f"unknown version-link context: {context}")
+
+
+def render_version_links(
+    package: dict[str, Any],
+    *,
+    context: str,
+    current_version: str,
+    exclude_current: bool,
+    title: str,
+) -> str:
+    releases = [
+        release
+        for release in package["versions"]
+        if not exclude_current or release["version"] != current_version
+    ]
+    if not releases:
+        return f'<section class="version-index"><h3>{html.escape(title)}</h3><p class="quiet">No other indexed versions.</p></section>'
+    items = []
+    for release in releases:
+        current = release["version"] == current_version
+        current_text = "Current page" if context == "version" else "Selected"
+        current_label = f'<span class="current-label">{current_text}</span>' if current else ""
+        current_attribute = ' aria-current="page"' if current and context == "version" else ""
+        items.append(
+            f'<li><a href="{html.escape(version_href(package, release, context), quote=True)}"'
+            f'{current_attribute}>'
+            f'<span>{html.escape(release["version"])}</span>'
+            f'<span class="version-link-status">{status_badge(release)}{current_label}</span>'
+            "</a></li>"
+        )
+    return f'<section class="version-index"><h3>{html.escape(title)}</h3><ul class="version-links">{"".join(items)}</ul></section>'
 
 
 def render_package(package: dict[str, Any]) -> str:
-    newest = package["versions"][0]["manifest"]
-    tags = newest.get("tags", [])
-    kind = package_kind(newest)
+    selected = release_for(package, package["selected_version"])
+    manifest = selected["manifest"]
+    tags = manifest.get("tags", [])
+    kind = package_kind(manifest)
     search = " ".join(
-        [package["name"], package["description"], package["latest_version"], *tags]
+        [package["name"], package["description"], package["selected_version"], *tags]
     ).lower()
     tag_html = "".join(f"<li>{html.escape(tag)}</li>" for tag in tags)
-    versions = "".join(
-        render_version(package["name"], release, index == 0)
-        for index, release in enumerate(package["versions"])
-    )
+    name = segment(package["name"])
+    version = segment(selected["version"])
     return f"""
     <details class="package" data-package data-kind="{kind}" data-search="{html.escape(search, quote=True)}">
       <summary class="package-summary">
         <span class="package-identity">
           <span class="package-name">{html.escape(package['name'])}</span>
-          <span class="version-badge">{html.escape(package['latest_version'])}</span>
+          <span class="version-badge">{html.escape(package['selected_version'])}</span>
+          {status_badge(selected, development_only=package['development_only'])}
         </span>
         <span class="package-description">{html.escape(package['description'])}</span>
         <span class="summary-action" aria-hidden="true">Details <span>+</span></span>
@@ -202,11 +291,15 @@ def render_package(package: dict[str, Any]) -> str:
         <div class="package-facts">
           <span class="kind-label">{kind.capitalize()}</span>
           <ul class="tag-list" aria-label="Tags">{tag_html}</ul>
-          <a href="crates/{html.escape(package['name'])}.json" download>Download package JSON</a>
+          <span class="package-links">
+            <a href="crates/{name}/">Crate page</a>
+            <a href="crates/{name}/{version}/">Version page</a>
+            <a href="crates/{name}.json" download>JSON</a>
+          </span>
         </div>
-        <div class="versions">
-          <h3>{len(package['versions'])} indexed version{'s' if len(package['versions']) != 1 else ''}</h3>
-          {versions}
+        <div class="package-release-layout">
+          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False)}
+          {render_version_links(package, context='home', current_version=selected['version'], exclude_current=True, title='Other versions')}
         </div>
       </div>
     </details>"""
@@ -328,6 +421,114 @@ def render_html(catalog: dict[str, Any]) -> str:
 """
 
 
+def render_detail_header(root_prefix: str) -> str:
+    return f"""
+    <header class="site-header">
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a class="brand" href="{root_prefix}" aria-label="Flyology Crate Index home">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="3" fill="currentColor"/></svg>
+          <span>Flyology Crates</span>
+        </a>
+        <ul class="nav-links" data-nav-links>
+          <li><a href="{root_prefix}#catalog" aria-current="page">Packages</a></li>
+          <li><a href="{root_prefix}crates.json" download>JSON</a></li>
+          <li><a href="https://github.com/flyology-ada/alire-index">GitHub</a></li>
+        </ul>
+        <div class="nav-tools">
+          <button class="icon-button" type="button" data-theme-toggle>
+            <span class="visually-hidden" data-theme-label>Use dark theme</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+          </button>
+          <button class="menu-button" type="button" data-menu-toggle aria-expanded="false">
+            <span class="visually-hidden">Toggle navigation</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+        </div>
+      </nav>
+    </header>"""
+
+
+def render_detail_footer(root_prefix: str, package: dict[str, Any]) -> str:
+    return f"""
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <p>Generated from the <a href="https://github.com/flyology-ada/alire-index">Flyology Alire index</a>.</p>
+        <div class="footer-links"><a href="{root_prefix}">Package index</a><a href="{root_prefix}crates/{segment(package['name'])}.json">Package JSON</a></div>
+      </div>
+    </footer>"""
+
+
+def render_detail_page(
+    package: dict[str, Any],
+    release: dict[str, Any],
+    *,
+    page_kind: str,
+) -> str:
+    is_version_page = page_kind == "version"
+    root_prefix = "../../../" if is_version_page else "../../"
+    name = package["name"]
+    version = release["version"]
+    encoded_name = segment(name)
+    encoded_version = segment(version)
+    canonical = (
+        f"{CANONICAL_URL}crates/{encoded_name}/{encoded_version}/"
+        if is_version_page
+        else f"{CANONICAL_URL}crates/{encoded_name}/"
+    )
+    description = release["manifest"].get("description", "No description provided.")
+    kind = package_kind(release["manifest"])
+    if is_version_page:
+        breadcrumbs = f'<a href="{root_prefix}">Index</a><span aria-hidden="true">/</span><a href="../">{html.escape(name)}</a><span aria-hidden="true">/</span><span aria-current="page">{html.escape(version)}</span>'
+        package_action = '<a class="button button-secondary" href="../">All crate versions</a>'
+        json_href = f"../../{encoded_name}.json"
+        version_context = "version"
+    else:
+        breadcrumbs = f'<a href="{root_prefix}">Index</a><span aria-hidden="true">/</span><span aria-current="page">{html.escape(name)}</span>'
+        package_action = f'<a class="button button-secondary" href="{encoded_version}/">Version page</a>'
+        json_href = f"../{encoded_name}.json"
+        version_context = "package"
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="{html.escape(description, quote=True)}">
+    <meta name="theme-color" content="#17213d">
+    <title>{html.escape(name)} {html.escape(version)} · Flyology Crates</title>
+    <link rel="canonical" href="{canonical}">
+    <link rel="alternate" type="application/json" href="{json_href}">
+    <link rel="icon" href="{root_prefix}favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="{root_prefix}assets/styles/site.css">
+    <link rel="stylesheet" href="{root_prefix}assets/styles/index.css">
+    <script src="{root_prefix}assets/scripts/ada-highlight.js"></script>
+    <script src="{root_prefix}assets/scripts/site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to crate details</a>
+    {render_detail_header(root_prefix)}
+    <main class="crate-page page-shell" id="main">
+      <nav class="breadcrumbs" aria-label="Breadcrumb">{breadcrumbs}</nav>
+      <header class="crate-hero">
+        <p class="eyebrow">{html.escape(kind)}</p>
+        <h1>{html.escape(name)}</h1>
+        <div class="crate-release-line"><code>{html.escape(version)}</code>{status_badge(release, development_only=package['development_only'])}</div>
+        <p>{html.escape(description)}</p>
+        <div class="actions">
+          {package_action}
+          <a class="button button-secondary" href="{json_href}" download>Download JSON</a>
+        </div>
+      </header>
+      <div class="detail-page-layout">
+        {render_release_detail(name, release, heading_level=2, raw_expanded=True)}
+        {render_version_links(package, context=version_context, current_version=version, exclude_current=False, title='Indexed versions')}
+      </div>
+    </main>
+    {render_detail_footer(root_prefix, package)}
+  </body>
+</html>
+"""
+
+
 INDEX_CSS = r"""
 .brand-mark { width: 2rem; height: 2rem; color: var(--violet-deep); }
 .catalog-hero { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(21rem, .72fr); align-items: center; min-height: min(48rem, calc(100svh - 4.75rem)); padding-block: clamp(5rem, 10vw, 8.5rem); gap: clamp(3rem, 8vw, 8rem); }
@@ -360,11 +561,13 @@ INDEX_CSS = r"""
 .package { border-bottom: 1px solid var(--line); }
 .package[hidden] { display: none; }
 .package-summary { display: grid; grid-template-columns: minmax(13rem, .72fr) minmax(16rem, 1.2fr) auto; align-items: center; min-height: 7.2rem; padding: 1.2rem .25rem; gap: 1.4rem; cursor: pointer; list-style: none; transition: background-color 180ms var(--ease-out), padding 180ms var(--ease-out); }
-.package-summary::-webkit-details-marker, .version > summary::-webkit-details-marker, .raw-manifest > summary::-webkit-details-marker { display: none; }
+.package-summary::-webkit-details-marker, .raw-manifest > summary::-webkit-details-marker { display: none; }
 .package-summary:hover, .package[open] > .package-summary { padding-inline: 1rem; background: var(--surface); }
 .package-identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: .65rem; min-width: 0; }
 .package-name { overflow-wrap: anywhere; font-size: clamp(1.05rem, 2vw, 1.4rem); font-weight: 620; letter-spacing: -.025em; }
 .version-badge { color: var(--violet-deep); font: .72rem var(--font-mono); }
+.release-status { display: inline-flex; align-items: center; padding: .18rem .48rem; border: 1px solid currentColor; border-radius: 999px; font: 620 .62rem var(--font-sans); letter-spacing: .035em; white-space: nowrap; }
+.release-status-development { background: color-mix(in oklch, var(--violet) 8%, var(--paper)); color: var(--violet-deep); }
 .package-description { max-width: 58ch; color: var(--ink-soft); font-size: .92rem; }
 .summary-action { display: inline-flex; align-items: center; gap: .6rem; color: var(--ink-soft); font-size: .72rem; }
 .summary-action span { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); font-size: 1rem; transition: transform 200ms var(--ease-out); }
@@ -374,14 +577,11 @@ INDEX_CSS = r"""
 .kind-label { color: var(--teal-deep); font: 650 .7rem var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
 .tag-list { display: flex; flex-wrap: wrap; margin: 0; padding: 0; gap: .35rem; list-style: none; }
 .tag-list li { padding: .16rem .48rem; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-soft); font-size: .68rem; }
-.package-facts > a { margin-left: auto; font-size: .76rem; font-weight: 580; }
-.versions h3 { margin: 1.8rem 0 1rem; font-size: 1rem; letter-spacing: -.015em; }
-.version { border-top: 1px solid var(--line); }
-.version:last-child { border-bottom: 1px solid var(--line); }
-.version > summary { display: grid; grid-template-columns: minmax(10rem, .35fr) minmax(15rem, 1fr); padding: .9rem .2rem; gap: 1rem; cursor: pointer; list-style: none; font: .76rem var(--font-mono); }
-.version > summary span:last-child { overflow-wrap: anywhere; color: var(--ink-soft); }
-.version[open] > summary { color: var(--violet-deep); }
-.version-body { padding: .4rem 0 1.6rem; }
+.package-links { display: flex; flex-wrap: wrap; margin-left: auto; gap: .45rem 1rem; font-size: .76rem; font-weight: 580; }
+.package-release-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, .32fr); align-items: start; gap: clamp(1.5rem, 4vw, 3rem); padding-top: 1.8rem; }
+.release-detail { min-width: 0; }
+.release-heading { display: flex; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; gap: .7rem; }
+.release-heading h2, .release-heading h3 { margin: 0; font-size: 1.15rem; letter-spacing: -.018em; }
 .metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--line); }
 .metadata div { display: grid; grid-template-columns: 8rem 1fr; padding: .75rem .2rem; gap: 1rem; border-bottom: 1px solid var(--line); }
 .metadata div:nth-child(odd) { margin-right: 1.2rem; }
@@ -396,6 +596,25 @@ INDEX_CSS = r"""
 .raw-manifest { margin-top: 1.5rem; }
 .raw-manifest > summary { display: inline-flex; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: .76rem; font-weight: 600; cursor: pointer; list-style: none; }
 .raw-manifest pre { max-height: 32rem; margin: .7rem 0 0; padding: 1rem; overflow: auto; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); font-size: .72rem; line-height: 1.65; }
+.version-index { min-width: 0; padding-top: .15rem; }
+.version-index h3 { margin-bottom: .7rem; font-size: .82rem; letter-spacing: -.01em; }
+.version-links { margin: 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
+.version-links li { border-bottom: 1px solid var(--line); }
+.version-links a { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: .72rem .15rem; gap: .6rem; font: .7rem var(--font-mono); text-decoration: none; }
+.version-links a:hover { background: var(--surface); }
+.version-links a > span:first-child { overflow-wrap: anywhere; }
+.version-link-status { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .35rem; }
+.current-label { color: var(--ink-soft); font: 600 .6rem var(--font-sans); white-space: nowrap; }
+.breadcrumbs { display: flex; flex-wrap: wrap; padding-top: 2rem; gap: .45rem; color: var(--ink-soft); font-size: .72rem; }
+.breadcrumbs a { color: var(--ink-soft); }
+.crate-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
+.crate-hero { max-width: 58rem; padding-block: clamp(4rem, 8vw, 7rem); }
+.crate-hero h1 { max-width: 100%; margin-bottom: 1rem; overflow-wrap: anywhere; font-size: clamp(2.8rem, 7vw, 6rem); }
+.crate-hero > p:not(.eyebrow) { max-width: 62ch; margin: 1.3rem 0 1.8rem; color: var(--ink-soft); font-size: 1.05rem; }
+.crate-release-line { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; }
+.crate-release-line code { color: var(--violet-deep); font-size: .9rem; }
+.detail-page-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, .34fr); align-items: start; gap: clamp(2rem, 6vw, 5rem); padding-top: 2rem; border-top: 1px solid var(--line); }
+.detail-page-layout .raw-manifest pre { max-height: none; }
 .empty-state { padding: 4rem 1rem; border-bottom: 1px solid var(--line); text-align: center; }
 .empty-state h3 { margin-bottom: .5rem; }
 .empty-state p { color: var(--ink-soft); }
@@ -408,6 +627,7 @@ INDEX_CSS = r"""
   .package-summary { grid-template-columns: 1fr auto; }
   .package-description { grid-column: 1 / -1; grid-row: 2; }
   .summary-action { grid-column: 2; grid-row: 1; }
+  .package-release-layout, .detail-page-layout { grid-template-columns: 1fr; }
   .metadata { grid-template-columns: 1fr; }
   .metadata div:nth-child(odd) { margin-right: 0; }
 }
@@ -420,8 +640,10 @@ INDEX_CSS = r"""
   .expand-button { grid-column: auto; }
   .package-summary { min-height: 0; padding-block: 1.4rem; }
   .package-body { padding-inline: .35rem; }
-  .package-facts > a { width: 100%; margin-left: 0; }
-  .version > summary, .metadata div, .dependency-list li { grid-template-columns: 1fr; gap: .3rem; }
+  .package-links { width: 100%; margin-left: 0; }
+  .metadata div, .dependency-list li { grid-template-columns: 1fr; gap: .3rem; }
+  .version-links a { grid-template-columns: 1fr; }
+  .version-link-status { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) {
   .package-summary, .summary-action span { transition: none; }
@@ -494,9 +716,13 @@ INDEX_JS = r"""
 README_TEXT = """Flyology crate index JSON
 ==========================
 
-crates.json is the aggregate catalog. Its schema_version is currently 1.
+crates.json is the aggregate catalog. Its schema_version is currently 2.
 Each crates/<name>.json file contains the same package object plus the catalog
 schema_version, generated_at, canonical_url, and index metadata.
+
+Each package records latest_version, selected_version, and development_only.
+selected_version is the newest non-dev release when one exists; otherwise it
+is the newest development release.
 
 Every version has a path and manifest field. The manifest is a lossless JSON
 representation of the corresponding TOML manifest, subject only to TOML date
@@ -530,7 +756,22 @@ def generate(source: Path, output: Path) -> dict[str, Any]:
     write_json(output / "crates.json", catalog)
     shared = {key: catalog[key] for key in ("schema_version", "generated_at", "canonical_url", "index")}
     for package in catalog["packages"]:
-        write_json(output / "crates" / f"{package['name']}.json", {**shared, "package": package})
+        encoded_name = segment(package["name"])
+        package_directory = output / "crates" / encoded_name
+        package_directory.mkdir(parents=True)
+        selected = release_for(package, package["selected_version"])
+        write_json(output / "crates" / f"{encoded_name}.json", {**shared, "package": package})
+        (package_directory / "index.html").write_text(
+            render_detail_page(package, selected, page_kind="package"),
+            encoding="utf-8",
+        )
+        for release in package["versions"]:
+            version_directory = package_directory / segment(release["version"])
+            version_directory.mkdir(parents=True)
+            (version_directory / "index.html").write_text(
+                render_detail_page(package, release, page_kind="version"),
+                encoding="utf-8",
+            )
 
     (output / "index.html").write_text(render_html(catalog), encoding="utf-8")
     (output / "assets" / "styles" / "index.css").write_text(INDEX_CSS.strip() + "\n", encoding="utf-8")

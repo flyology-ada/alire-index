@@ -29,6 +29,14 @@ package:
 - `https://crates.flyology.org/crates/<package-name>.json`
 
 Both forms contain the complete parsed manifest for every indexed version.
+Human-readable crate and version pages use these routes:
+
+- `https://crates.flyology.org/crates/<package-name>/`
+- `https://crates.flyology.org/crates/<package-name>/<version>/`
+
+The package page selects the newest published version. If a crate has only
+`-dev` manifests, it selects the newest development version and identifies the
+crate as development-only.
 GitHub Pages serves JSON with `Access-Control-Allow-Origin: *`, so browser
 applications on other origins can fetch these URLs directly. GitHub Pages does
 not support repository-defined custom response headers, so clients should
