@@ -9,3 +9,7 @@ obj
 *.cgpr
 *.db
 *.xml
+
+# Generated website artifact
+build/
+vendor/

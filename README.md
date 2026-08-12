@@ -16,6 +16,39 @@ alr index --add=git+https://github.com/flyology-ada/alire-index.git \
 The repository's default branch is `main`. Release origins remain pinned to
 exact source commits so an indexed version does not change after publication.
 
+## Web catalog and JSON
+
+The index is published at [crates.flyology.org](https://crates.flyology.org/).
+The site is generated from the TOML manifests on every push to `main`; it does
+not maintain a separate package inventory.
+
+Machine-readable data is available as an aggregate catalog and as one file per
+package:
+
+- `https://crates.flyology.org/crates.json`
+- `https://crates.flyology.org/crates/<package-name>.json`
+
+Both forms contain the complete parsed manifest for every indexed version.
+GitHub Pages serves JSON with `Access-Control-Allow-Origin: *`, so browser
+applications on other origins can fetch these URLs directly. GitHub Pages does
+not support repository-defined custom response headers, so clients should
+treat this CORS policy as hosting-platform behavior.
+
+Build and check the site locally with a checkout of
+[`flyology-ada/website-kit`](https://github.com/flyology-ada/website-kit):
+
+```sh
+WEBSITE_KIT_DIR=../website-kit ./scripts/build-site.sh
+```
+
+The generator requires Python 3.11 or newer. Set `PYTHON` if the modern Python
+executable is not the first `python3` on your path.
+
+The repository's Pages settings must use **GitHub Actions** as the source and
+set `crates.flyology.org` as the custom domain. With an Actions publishing
+source, GitHub stores the domain in repository settings and ignores a `CNAME`
+file in the uploaded artifact.
+
 ## Patched GNAT toolchains
 
 The index imports `gnat_flyology_native` manifests from immutable
