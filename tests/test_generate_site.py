@@ -64,8 +64,11 @@ class GenerateSiteTests(unittest.TestCase):
 
         self.assertIn('<img class="brand-mark" src="./flyology-logo.svg" alt="">', home)
         self.assertIn('<link rel="icon" href="flyology-logo.svg" type="image/svg+xml">', home)
+        self.assertIn(f'href="assets/styles/index.css?v={generate_site.INDEX_CSS_VERSION}"', home)
         self.assertIn('<img class="brand-mark" src="../flyology-logo.svg" alt="">', changes)
+        self.assertIn(f'href="../assets/styles/index.css?v={generate_site.INDEX_CSS_VERSION}"', changes)
         self.assertIn('<img class="brand-mark" src="../../flyology-logo.svg" alt="">', crate)
+        self.assertIn(f'href="../../assets/styles/index.css?v={generate_site.INDEX_CSS_VERSION}"', crate)
         self.assertIn("Flyology primary icon", logo)
         self.assertIn('viewBox="0 0 256 256"', logo)
         self.assertIn(':root[data-theme="dark"] .brand img.brand-mark { filter: none; }', styles)

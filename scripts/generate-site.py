@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -682,7 +683,7 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     <link rel="canonical" href="{CANONICAL_URL}">
     <link rel="icon" href="flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="assets/styles/site.css">
-    <link rel="stylesheet" href="assets/styles/index.css">
+    <link rel="stylesheet" href="assets/styles/index.css?v={INDEX_CSS_VERSION}">
     <script src="assets/scripts/ada-highlight.js"></script>
     <script src="assets/scripts/site.js"></script>
     <script src="assets/scripts/index.js" defer></script>
@@ -808,7 +809,7 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
     <link rel="canonical" href="{CANONICAL_URL}changes/">
     <link rel="icon" href="../flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="../assets/styles/site.css">
-    <link rel="stylesheet" href="../assets/styles/index.css">
+    <link rel="stylesheet" href="../assets/styles/index.css?v={INDEX_CSS_VERSION}">
     <script src="../assets/scripts/ada-highlight.js"></script>
     <script src="../assets/scripts/site.js"></script>
   </head>
@@ -891,7 +892,7 @@ def render_detail_page(
     <link rel="alternate" type="application/json" href="{json_href}">
     <link rel="icon" href="{root_prefix}flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="{root_prefix}assets/styles/site.css">
-    <link rel="stylesheet" href="{root_prefix}assets/styles/index.css">
+    <link rel="stylesheet" href="{root_prefix}assets/styles/index.css?v={INDEX_CSS_VERSION}">
     <script src="{root_prefix}assets/scripts/ada-highlight.js"></script>
     <script src="{root_prefix}assets/scripts/site.js"></script>
   </head>
@@ -1102,6 +1103,8 @@ INDEX_CSS = r"""
   .package-summary, .summary-action span { transition: none; }
 }
 """
+
+INDEX_CSS_VERSION = hashlib.sha256(INDEX_CSS.encode()).hexdigest()[:12]
 
 
 INDEX_JS = r"""
