@@ -643,7 +643,7 @@ def render_site_header(root_prefix: str, current: str) -> str:
     <header class="site-header">
       <nav class="site-nav" aria-label="Primary navigation">
         <a class="brand" href="{root_prefix}" aria-label="Flyology Crate Index home">
-          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="17" r="3" fill="currentColor"/></svg>
+          <img class="brand-mark" src="{root_prefix}flyology-logo.svg" alt="">
           <span>Flyology Crates</span>
         </a>
         <ul class="nav-links" data-nav-links>
@@ -680,7 +680,7 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     <meta name="theme-color" content="#17213d">
     <title>Flyology Crate Index</title>
     <link rel="canonical" href="{CANONICAL_URL}">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="assets/styles/site.css">
     <link rel="stylesheet" href="assets/styles/index.css">
     <script src="assets/scripts/ada-highlight.js"></script>
@@ -806,7 +806,7 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
     <meta name="theme-color" content="#17213d">
     <title>Index changes · Flyology Crates</title>
     <link rel="canonical" href="{CANONICAL_URL}changes/">
-    <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="../flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="../assets/styles/site.css">
     <link rel="stylesheet" href="../assets/styles/index.css">
     <script src="../assets/scripts/ada-highlight.js"></script>
@@ -889,7 +889,7 @@ def render_detail_page(
     <title>{html.escape(name)} {html.escape(version)} · Flyology Crates</title>
     <link rel="canonical" href="{canonical}">
     <link rel="alternate" type="application/json" href="{json_href}">
-    <link rel="icon" href="{root_prefix}favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="{root_prefix}flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="{root_prefix}assets/styles/site.css">
     <link rel="stylesheet" href="{root_prefix}assets/styles/index.css">
     <script src="{root_prefix}assets/scripts/ada-highlight.js"></script>
@@ -922,7 +922,7 @@ def render_detail_page(
 
 
 INDEX_CSS = r"""
-.brand-mark { width: 2rem; height: 2rem; color: var(--violet-deep); }
+.brand-mark { display: block; width: 2rem; height: 2rem; }
 .catalog-hero { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(21rem, .72fr); align-items: center; min-height: min(48rem, calc(100svh - 4.75rem)); padding-block: clamp(5rem, 10vw, 8.5rem); gap: clamp(3rem, 8vw, 8rem); }
 .catalog-hero h1 { max-width: 10ch; font-size: clamp(3.2rem, 7vw, 7rem); }
 .install-panel { overflow: hidden; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); box-shadow: 0 1.7rem 4rem oklch(10% .04 270 / .22); }
@@ -1185,10 +1185,37 @@ serves static assets with Access-Control-Allow-Origin: *.
 """
 
 
-FAVICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#f7f7fc"/>
-  <path d="M4 17c6-1 9-5 12-12 3 7 6 11 12 12-6 1-9 4-12 10-3-6-6-9-12-10Z" fill="none" stroke="#674fc2" stroke-width="2"/>
-  <circle cx="16" cy="17" r="3" fill="#674fc2"/>
+FLYOLOGY_LOGO = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Flyology primary icon</title>
+  <desc id="desc">An abstract flight mark inside an open event loop with three cooperative task nodes.</desc>
+  <defs>
+    <mask id="node-gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="white"/>
+      <circle cx="203.4" cy="77.1" r="10.5" fill="black"/>
+      <circle cx="219" cy="128" r="10.5" fill="black"/>
+      <circle cx="203.4" cy="178.9" r="10.5" fill="black"/>
+    </mask>
+  </defs>
+
+  <rect x="12" y="12" width="232" height="232" rx="58" fill="#10172B"/>
+
+  <g mask="url(#node-gaps)" fill="none" stroke-width="8" stroke-linecap="round">
+    <circle cx="128" cy="128" r="91" stroke="#3C4868"/>
+    <path d="M186.5 58.3A91 91 0 0 1 219 128" stroke="#756CF6"/>
+    <path d="M219 128A91 91 0 0 1 186.5 197.7" stroke="#2CCBC1"/>
+  </g>
+
+  <circle cx="203.4" cy="77.1" r="6.5" fill="#756CF6"/>
+  <circle cx="219" cy="128" r="6.5" fill="#756CF6"/>
+  <circle cx="203.4" cy="178.9" r="6.5" fill="#2CCBC1"/>
+  <path d="M177.8 205.8C179.3 201.4 180.2 197.4 180.4 193.2C184 196.3 188.1 198.7 192.5 199.9C187.9 201.1 182.8 203.2 177.8 205.8Z" fill="#2CCBC1"/>
+
+  <g fill="#F7F9FF">
+    <path d="M143 103C116 88 91 78 62 75C84 94 102 112 116 134C120 140 128 138 134 132C141 124 145 113 143 103Z"/>
+    <path d="M128 137C109 127 89 122 68 124C86 135 101 148 112 163C117 169 124 166 129 160C134 153 134 144 128 137Z"/>
+    <path d="M119 177C126 145 133 118 146 97C158 81 173 72 191 68C176 87 160 108 148 134C140 152 133 165 119 177Z"/>
+    <circle cx="129" cy="137" r="4"/>
+  </g>
 </svg>
 """
 
@@ -1233,7 +1260,7 @@ def generate(source: Path, output: Path) -> dict[str, Any]:
     )
     (output / "assets" / "styles" / "index.css").write_text(INDEX_CSS.strip() + "\n", encoding="utf-8")
     (output / "assets" / "scripts" / "index.js").write_text(INDEX_JS.strip() + "\n", encoding="utf-8")
-    (output / "favicon.svg").write_text(FAVICON, encoding="utf-8")
+    (output / "flyology-logo.svg").write_text(FLYOLOGY_LOGO, encoding="utf-8")
     (output / "README.txt").write_text(README_TEXT, encoding="utf-8")
     (output / ".nojekyll").write_text("", encoding="utf-8")
     return catalog

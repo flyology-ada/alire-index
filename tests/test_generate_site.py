@@ -55,6 +55,19 @@ class GenerateSiteTests(unittest.TestCase):
         development_only = sum(package["development_only"] for package in self.catalog["packages"])
         self.assertEqual(page.count("Development only"), development_only)
 
+    def test_pages_use_the_flyology_logo(self) -> None:
+        home = (self.output / "index.html").read_text(encoding="utf-8")
+        changes = (self.output / "changes" / "index.html").read_text(encoding="utf-8")
+        crate = (self.output / "crates" / "flyology" / "index.html").read_text(encoding="utf-8")
+        logo = (self.output / "flyology-logo.svg").read_text(encoding="utf-8")
+
+        self.assertIn('<img class="brand-mark" src="./flyology-logo.svg" alt="">', home)
+        self.assertIn('<link rel="icon" href="flyology-logo.svg" type="image/svg+xml">', home)
+        self.assertIn('<img class="brand-mark" src="../flyology-logo.svg" alt="">', changes)
+        self.assertIn('<img class="brand-mark" src="../../flyology-logo.svg" alt="">', crate)
+        self.assertIn("Flyology primary icon", logo)
+        self.assertIn('viewBox="0 0 256 256"', logo)
+
     def test_home_page_has_a_bounded_mixed_change_preview(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")
         self.assertIn('href="changes/"', page)
