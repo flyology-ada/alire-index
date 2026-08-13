@@ -16,13 +16,32 @@ RELEASES = os.environ.get(
     "GNAT_PATCHES_RELEASES_API",
     "https://api.github.com/repos/flyology-ada/gnat-patches/releases?per_page=100",
 )
-TAG = re.compile(r"patchset-(\d+\.\d+\.\d+)-gcc-(\d+)")
-VERSION = re.compile(r"(\d+\.\d+\.\d+)-patchset\.(\d+\.\d+\.\d+)")
+TAG = re.compile(
+    r"patchset-(?P<patchset>\d+\.\d+\.\d+)-gcc-"
+    r"(?P<compiler>\d+(?:\.\d+\.\d+)?)"
+)
+VERSION = re.compile(
+    r"(?P<compiler>\d+\.\d+\.\d+)-patchset\."
+    r"(?P<patchset>\d+\.\d+\.\d+)"
+)
 PLATFORMS = {"linux-x86_64", "linux-aarch64", "macos-aarch64"}
 
 
 class ImportError(RuntimeError):
     pass
+
+
+def tag_matches_version(version: str, tag: str) -> bool:
+    version_match = VERSION.fullmatch(version)
+    tag_match = TAG.fullmatch(tag)
+    if not version_match or not tag_match:
+        return False
+    compiler = version_match.group("compiler")
+    tagged_compiler = tag_match.group("compiler")
+    return (
+        version_match.group("patchset") == tag_match.group("patchset")
+        and tagged_compiler in {compiler, compiler.partition(".")[0]}
+    )
 
 
 def fetch(url: str) -> bytes:
@@ -57,12 +76,11 @@ def validate_manifest(content: bytes, name: str, tag: str, assets: dict[str, dic
         raise ImportError(f"unexpected crate name in {name}")
     version = data.get("version", "")
     version_match = VERSION.fullmatch(version)
-    tag_match = TAG.fullmatch(tag)
-    if not version_match or not tag_match or version_match.group(2) != tag_match.group(1):
+    if not version_match or not tag_matches_version(version, tag):
         raise ImportError(f"version/tag mismatch for {name}")
     if name != f"gnat_flyology_native-{version}.toml":
         raise ImportError(f"manifest filename/version mismatch: {name}")
-    if data.get("provides") != [f"gnat={version_match.group(1)}"]:
+    if data.get("provides") != [f"gnat={version_match.group('compiler')}"]:
         raise ImportError(f"invalid GNAT provider declaration in {name}")
 
     origins = binary_origins(data.get("origin", {}))
