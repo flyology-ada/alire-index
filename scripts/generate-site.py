@@ -1188,6 +1188,42 @@ serves static assets with Access-Control-Allow-Origin: *.
 """
 
 
+def render_llms(catalog: dict[str, Any]) -> str:
+    package_links = []
+    for package in catalog["packages"]:
+        name = package["name"]
+        description = package["description"].rstrip()
+        if not description.endswith((".", "!", "?")):
+            description += "."
+        status = " Development-only." if package["development_only"] else ""
+        package_links.append(
+            f"- [{name}]({CANONICAL_URL}crates/{segment(name)}.json): "
+            f"{description} Selected version: {package['selected_version']}.{status}"
+        )
+
+    return f"""# Flyology Crate Index
+
+> A human- and machine-readable catalog of Ada packages and GNAT compiler builds maintained by Flyology and published through a custom Alire index.
+
+This index is separate from the Alire community index. The JSON resources are generated directly from the indexed TOML manifests and preserve every manifest field. A package's `selected_version` is its newest published release, or its newest development release when no published release exists.
+
+## Catalog
+
+- [Catalog home]({CANONICAL_URL}): Browse, search, and configure the Flyology Alire index.
+- [Aggregate JSON catalog]({CANONICAL_URL}crates.json): Complete package and version inventory, including every parsed manifest.
+- [Change history]({CANONICAL_URL}changes/): Publications and development-source updates derived from Git history.
+- [JSON schema notes]({CANONICAL_URL}README.txt): Field semantics and endpoint conventions.
+
+## Packages
+
+{chr(10).join(package_links)}
+
+## Optional
+
+- [Source repository]({REPOSITORY_URL}): Alire manifests, site generator, and index configuration.
+"""
+
+
 FLYOLOGY_MARK = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Flyology transparent mark</title>
   <desc id="desc">An abstract flight mark inside an open event loop with three cooperative task nodes.</desc>
@@ -1299,6 +1335,7 @@ def generate(source: Path, output: Path) -> dict[str, Any]:
     (output / "flyology-mark.svg").write_text(FLYOLOGY_MARK, encoding="utf-8")
     (output / "flyology-logo.svg").write_text(FLYOLOGY_LOGO, encoding="utf-8")
     (output / "README.txt").write_text(README_TEXT, encoding="utf-8")
+    (output / "llms.txt").write_text(render_llms(catalog), encoding="utf-8")
     (output / ".nojekyll").write_text("", encoding="utf-8")
     return catalog
 

@@ -55,6 +55,21 @@ class GenerateSiteTests(unittest.TestCase):
         development_only = sum(package["development_only"] for package in self.catalog["packages"])
         self.assertEqual(page.count("Development only"), development_only)
 
+    def test_llms_file_describes_catalog_and_every_package(self) -> None:
+        document = (self.output / "llms.txt").read_text(encoding="utf-8")
+        self.assertTrue(document.startswith("# Flyology Crate Index\n\n> "))
+        self.assertIn(f"[Aggregate JSON catalog]({generate_site.CANONICAL_URL}crates.json)", document)
+        self.assertIn(f"[Change history]({generate_site.CANONICAL_URL}changes/)", document)
+        self.assertIn(f"[JSON schema notes]({generate_site.CANONICAL_URL}README.txt)", document)
+        for package in self.catalog["packages"]:
+            endpoint = (
+                f"- [{package['name']}]({generate_site.CANONICAL_URL}crates/"
+                f"{generate_site.segment(package['name'])}.json):"
+            )
+            self.assertIn(endpoint, document)
+            self.assertIn(package["description"], document)
+        self.assertEqual(document.count("\n- ["), len(self.catalog["packages"]) + 5)
+
     def test_pages_use_the_flyology_logo(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
         changes = (self.output / "changes" / "index.html").read_text(encoding="utf-8")

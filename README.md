@@ -28,6 +28,9 @@ package:
 - `https://crates.flyology.org/crates.json`
 - `https://crates.flyology.org/crates/<package-name>.json`
 
+LLM-oriented catalog discovery is available at
+`https://crates.flyology.org/llms.txt`.
+
 Both forms contain the complete parsed manifest for every indexed version.
 Human-readable routes include:
 
