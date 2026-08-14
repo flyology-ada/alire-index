@@ -40,20 +40,61 @@ make_manifest () {
   crate_name=$2
   version=$3
   origin=$4
+  subdir=${5:-}
   mkdir -p "$(dirname -- "$manifest")"
   {
     printf 'name = "%s"\n' "$crate_name"
     printf 'version = "%s"\n\n' "$version"
     printf '[origin]\n'
     printf 'commit = "0000000000000000000000000000000000000000"\n'
+    if [ -n "$subdir" ]; then
+      printf 'subdir = "%s"\n' "$subdir"
+    fi
     printf 'url = "git+%s"\n' "$origin"
+  } >"$manifest"
+}
+
+make_source_manifest () {
+  manifest=$1
+  crate_name=$2
+  version=$3
+  mkdir -p "$(dirname -- "$manifest")"
+  {
+    printf 'name = "%s"\n' "$crate_name"
+    printf 'description = "Tagged source manifest for %s"\n' "$crate_name"
+    printf 'version = "%s"\n' "$version"
+    printf 'licenses = "MIT"\n'
   } >"$manifest"
 }
 
 make_source alpha
 make_source beta
+make_source gamma
 alpha_remote="$temporary_root/alpha.git"
 beta_remote="$temporary_root/beta.git"
+gamma_remote="$temporary_root/gamma.git"
+
+# Release tags are namespaced by crate so one monorepo can publish several
+# manifests independently. Cover both lightweight and annotated tags.
+make_source_manifest "$temporary_root/alpha-work/alire.toml" alpha 0.2.0
+make_source_manifest \
+  "$temporary_root/alpha-work/alpha_extra/alire.toml" alpha_extra 0.1.0
+git -C "$temporary_root/alpha-work" add alire.toml alpha_extra/alire.toml
+git -C "$temporary_root/alpha-work" commit -q -m 'Prepare alpha releases'
+git -C "$temporary_root/alpha-work" tag alpha/v0.2.0
+git -C "$temporary_root/alpha-work" tag -a alpha_extra/v0.1.0 \
+  -m 'Publish alpha_extra 0.1.0'
+git -C "$temporary_root/alpha-work" tag alpha/v0.2
+git -C "$temporary_root/alpha-work" tag unrelated/v9.9.9
+git -C "$temporary_root/alpha-work" push -q origin main --tags
+
+# A tag and its source manifest must agree before anything is published.
+make_source_manifest "$temporary_root/gamma-work/alire.toml" gamma 0.1.1
+git -C "$temporary_root/gamma-work" add alire.toml
+git -C "$temporary_root/gamma-work" commit -q -m 'Prepare mismatched gamma release'
+git -C "$temporary_root/gamma-work" tag gamma/v0.1.0
+git -C "$temporary_root/gamma-work" push -q origin main --tags
+
 alpha_head=$(git -C "$alpha_remote" rev-parse refs/heads/main)
 beta_head=$(git -C "$beta_remote" rev-parse refs/heads/main)
 
@@ -84,10 +125,13 @@ make_manifest \
   alpha 0.2.0-dev "$alpha_remote"
 make_manifest \
   "$index_seed/index/al/alpha_extra/alpha_extra-0.1.0-dev.toml" \
-  alpha_extra 0.1.0-dev "$alpha_remote"
+  alpha_extra 0.1.0-dev "$alpha_remote" alpha_extra
 make_manifest \
   "$index_seed/index/be/beta/beta-0.1.0-dev.toml" \
   beta 0.1.0-dev "$beta_remote"
+make_manifest \
+  "$index_seed/index/ga/gamma/gamma-0.1.0-dev.toml" \
+  gamma 0.1.0-dev "$gamma_remote"
 make_manifest \
   "$index_seed/index/al/alpha/alpha-0.1.0.toml" \
   alpha 0.1.0 "$alpha_remote"
@@ -117,20 +161,50 @@ printf '%s\n' "$*" >>"${ALR_LOG:?}"
 EOF
 chmod +x "$fake_alr"
 
+invalid_work="$temporary_root/index-invalid-work"
+git clone -q "$index_remote" "$invalid_work"
+if ALR=$fake_alr ALR_LOG=$alr_log \
+  "$invalid_work/scripts/update-dev-origins.sh" --crate gamma \
+  >"$temporary_root/invalid.stdout" 2>"$temporary_root/invalid.stderr"; then
+  fail "release tag with mismatched source metadata was accepted"
+fi
+grep -F 'alire.toml at gamma/v0.1.0 declares version 0.1.1' \
+  "$temporary_root/invalid.stderr" >/dev/null || \
+  fail "release metadata mismatch was not explained"
+[ ! -e "$invalid_work/index/ga/gamma/gamma-0.1.0.toml" ] || \
+  fail "invalid tagged release created an index manifest"
+git -C "$temporary_root/gamma-work" tag -d gamma/v0.1.0 >/dev/null
+git -C "$temporary_root/gamma-work" push -q origin :refs/tags/gamma/v0.1.0
+
+release_only_work="$temporary_root/index-release-only-work"
+git clone -q "$index_remote" "$release_only_work"
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$release_only_work/scripts/update-dev-origins.sh" \
+  --crate alpha --releases-only --commit
+[ -f "$release_only_work/index/al/alpha/alpha-0.2.0.toml" ] || \
+  fail "--releases-only did not publish a matching tag"
+for manifest in \
+  index/al/alpha/alpha-0.2.0-dev.toml \
+  index/al/alpha_extra/alpha_extra-0.1.0-dev.toml; do
+  grep -F 'commit = "0000000000000000000000000000000000000000"' \
+    "$release_only_work/$manifest" >/dev/null || \
+    fail "--releases-only advanced $manifest"
+done
+
 ALR=$fake_alr ALR_LOG=$alr_log \
   "$index_work/scripts/update-dev-origins.sh" --crate missing \
   >"$temporary_root/missing.stdout" 2>"$temporary_root/missing.stderr" && \
   fail "unknown crate selector was accepted"
-grep -F 'no release manifest is named missing' \
+grep -F 'no development manifest is named missing' \
   "$temporary_root/missing.stderr" >/dev/null || \
   fail "unknown crate selector failure was not explained"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
-  "$index_work/scripts/update-dev-origins.sh" --crate released \
+  "$index_work/scripts/update-dev-origins.sh" --crate released --releases-only \
   >"$temporary_root/released.stdout"
-grep -F 'no active development manifest remains' \
+grep -F 'No matching releases were found.' \
   "$temporary_root/released.stdout" >/dev/null || \
-  fail "retired development selector was not explained"
+  fail "retired development selector did not scan for releases"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
   "$index_work/scripts/update-dev-origins.sh" --crate alpha_extra --push
@@ -156,6 +230,38 @@ grep -F 'commit = "0000000000000000000000000000000000000000"' \
 grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/al/alpha/alpha-0.1.0.toml" >/dev/null || \
   fail "stable manifest was changed"
+for release in \
+  index/al/alpha/alpha-0.2.0.toml \
+  index/al/alpha_extra/alpha_extra-0.1.0.toml; do
+  [ -f "$index_work/$release" ] || \
+    fail "$release was not published from its release tag"
+  grep -F "commit = \"$alpha_head\"" "$index_work/$release" >/dev/null || \
+    fail "$release did not use its tag commit"
+done
+grep -F 'description = "Tagged source manifest for alpha"' \
+  "$index_work/index/al/alpha/alpha-0.2.0.toml" >/dev/null || \
+  fail "release metadata did not come from the tagged source manifest"
+grep -F 'subdir = "alpha_extra"' \
+  "$index_work/index/al/alpha_extra/alpha_extra-0.1.0.toml" >/dev/null || \
+  fail "monorepo release did not preserve its origin subdirectory"
+git -C "$index_work" log -1 --format=%s | \
+  grep -F 'Problem: Tagged crate releases are not indexed' >/dev/null || \
+  fail "release commit does not use the repository message format"
+
+# A published version retires the development line, but that manifest must
+# remain a source descriptor for discovering later patch releases.
+make_source_manifest "$temporary_root/alpha-work/alire.toml" alpha 0.2.1
+git -C "$temporary_root/alpha-work" add alire.toml
+git -C "$temporary_root/alpha-work" commit -q -m 'Prepare alpha patch release'
+git -C "$temporary_root/alpha-work" tag alpha/v0.2.1
+git -C "$temporary_root/alpha-work" push -q origin alpha/v0.2.1
+patch_work="$temporary_root/index-patch-work"
+git clone -q "$index_remote" "$patch_work"
+ALR=$fake_alr ALR_LOG=$alr_log \
+  "$patch_work/scripts/update-dev-origins.sh" \
+  --crate alpha --releases-only --commit
+[ -f "$patch_work/index/al/alpha/alpha-0.2.1.toml" ] || \
+  fail "retired development source did not discover a later patch release"
 
 # Omitting selectors must retain the original update-all behavior.
 all_work="$temporary_root/index-all-work"

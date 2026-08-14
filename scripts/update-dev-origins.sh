@@ -3,23 +3,29 @@ set -eu
 
 usage () {
   cat <<'EOF'
-Usage: ./scripts/update-dev-origins.sh [--crate NAME]... [--commit] [--push]
+Usage: ./scripts/update-dev-origins.sh [--crate NAME]... [--releases-only]
+                                      [--commit] [--push]
 
-Fast-forward this index checkout, then pin every active -dev manifest to the
-HEAD advertised by its configured Git origin. Manifests that share an origin
-are advanced to the same exact commit. A stable release retires development
-versions of the same crate at that semantic version or lower.
+Fast-forward this index checkout, publish releases tagged <crate>/v<version>,
+then pin every active -dev manifest to the HEAD advertised by its configured
+Git origin. Manifests that share an origin are advanced to the same exact
+commit. A stable release retires development versions of the same crate at
+that semantic version or lower on subsequent runs.
 
   --crate NAME
             update only the origin group containing NAME; may be repeated
+  --releases-only
+            publish matching tags without advancing development origins
   --commit  commit the validated manifest updates
   --push    commit the updates and push the current branch
   -h, --help
             show this help
 
-With no --crate option, every development origin is updated. Selecting one
-crate updates all development manifests that share its origin so packages from
-one source repository cannot acquire inconsistent pins.
+With no --crate option, every development origin is scanned. Selecting one
+crate scans all development manifests that share its origin so packages from
+one source repository cannot acquire inconsistent pins. Release tags use the
+form <crate>/v<version>, and the tagged alire.toml must declare that same crate
+name and stable semantic version.
 
 The checkout must be clean, attached to a branch, and have an upstream. Alire
 is taken from $ALR when set, or from PATH otherwise.
@@ -33,6 +39,7 @@ fail () {
 
 commit_changes=0
 push_changes=0
+update_development=1
 selected_crates=
 
 select_crate () {
@@ -58,6 +65,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --commit)
       commit_changes=1
+      ;;
+    --releases-only)
+      update_development=0
       ;;
     --push)
       commit_changes=1
@@ -129,16 +139,24 @@ catalog_inventory="$temporary_root/catalog-inventory"
 development_candidates="$temporary_root/development-candidates"
 stable_versions="$temporary_root/stable-versions"
 manifest_inventory="$temporary_root/manifest-inventory"
+release_sources="$temporary_root/release-sources"
 remote_heads="$temporary_root/remote-heads"
+remote_tags="$temporary_root/remote-tags"
+source_repositories="$temporary_root/source-repositories"
 selected_origins="$temporary_root/selected-origins"
 update_plan="$temporary_root/update-plan"
+release_plan="$temporary_root/release-plan"
 : >"$catalog_inventory"
 : >"$development_candidates"
 : >"$stable_versions"
 : >"$manifest_inventory"
+: >"$release_sources"
 : >"$remote_heads"
+: >"$remote_tags"
+: >"$source_repositories"
 : >"$selected_origins"
 : >"$update_plan"
+: >"$release_plan"
 
 (
   cd "$index_root"
@@ -196,6 +214,35 @@ origin_field () {
         exit 1
       }
       print result
+    }
+  ' "$manifest"
+}
+
+origin_optional_field () {
+  field=$1
+  manifest=$2
+  awk -v field="$field" '
+    /^\[[^]]+\][[:space:]]*$/ {
+      in_origin = ($0 == "[origin]")
+    }
+    in_origin && $0 ~ "^[[:space:]]*" field "[[:space:]]*=" {
+      value = $0
+      if (value !~ /^[^=]+=[[:space:]]*"[^"]+"[[:space:]]*$/) {
+        invalid = 1
+        next
+      }
+      sub(/^[^=]+=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      found++
+      result = value
+    }
+    END {
+      if (invalid || found > 1) {
+        exit 1
+      }
+      if (found == 1) {
+        print result
+      }
     }
   ' "$manifest"
 }
@@ -268,21 +315,6 @@ done <"$catalog_list"
 tab=$(printf '\t')
 while IFS="$tab" read -r \
   relative_manifest crate_name version development_core; do
-  retired_by=
-  while IFS="$tab" read -r stable_crate stable_version; do
-    [ "$stable_crate" = "$crate_name" ] || continue
-    if semver_at_least "$stable_version" "$development_core"; then
-      retired_by=$stable_version
-      break
-    fi
-  done <"$stable_versions"
-
-  if [ -n "$retired_by" ]; then
-    printf '%s\n' \
-      "Ignoring $crate_name $version: stable $retired_by is at least as new."
-    continue
-  fi
-
   manifest="$index_root/$relative_manifest"
   origin_url=$(origin_field url "$manifest") || \
     fail "$relative_manifest must contain exactly one quoted [origin] URL"
@@ -300,15 +332,34 @@ while IFS="$tab" read -r \
 
   printf '%s\t%s\t%s\t%s\n' \
     "$relative_manifest" "$crate_name" "$origin_url" "$old_commit" \
+    >>"$release_sources"
+
+  retired_by=
+  while IFS="$tab" read -r stable_crate stable_version; do
+    [ "$stable_crate" = "$crate_name" ] || continue
+    if semver_at_least "$stable_version" "$development_core"; then
+      retired_by=$stable_version
+      break
+    fi
+  done <"$stable_versions"
+
+  if [ -n "$retired_by" ]; then
+    printf '%s\n' \
+      "Ignoring $crate_name $version: stable $retired_by is at least as new."
+    continue
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' \
+    "$relative_manifest" "$crate_name" "$origin_url" "$old_commit" \
     >>"$manifest_inventory"
 done <"$development_candidates"
 
 if [ -z "$selected_crates" ]; then
-  if [ ! -s "$manifest_inventory" ]; then
-    printf '%s\n' "No active development manifests remain."
+  if [ ! -s "$release_sources" ]; then
+    printf '%s\n' "No development manifests identify repositories to scan."
     exit 0
   fi
-  awk -F '\t' '{ print $3 }' "$manifest_inventory" | \
+  awk -F '\t' '{ print $3 }' "$release_sources" | \
     LC_ALL=C sort -u >"$selected_origins"
 else
   for requested_crate in $selected_crates; do
@@ -318,21 +369,10 @@ else
         found = 1
       }
       END { if (!found) exit 1 }
-    ' "$manifest_inventory" >>"$selected_origins"; then
-      if awk -F '\t' -v crate="$requested_crate" \
-        '$2 == crate { found = 1 } END { exit !found }' \
-        "$catalog_inventory"; then
-        printf '%s\n' \
-          "Ignoring $requested_crate: no active development manifest remains."
-      else
-        fail "no release manifest is named $requested_crate"
-      fi
+    ' "$release_sources" >>"$selected_origins"; then
+      fail "no development manifest is named $requested_crate"
     fi
   done
-  if [ ! -s "$selected_origins" ]; then
-    printf '%s\n' "No selected crate has an active development manifest."
-    exit 0
-  fi
   LC_ALL=C sort -u "$selected_origins" >"$temporary_root/sorted-origins"
   mv "$temporary_root/sorted-origins" "$selected_origins"
 fi
@@ -350,7 +390,7 @@ while IFS="$tab" read -r \
     '$1 == url { print $2; exit }' "$remote_heads")
   if [ -z "$new_commit" ]; then
     printf '%s\n' "Resolving $origin_url..."
-    git ls-remote --symref "$remote_url" HEAD \
+    git ls-remote --symref "$remote_url" HEAD 'refs/tags/*' \
       >"$temporary_root/ls-remote" || \
       fail "could not resolve remote HEAD for $origin_url"
     new_commit=$(awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }' \
@@ -363,18 +403,153 @@ while IFS="$tab" read -r \
     [ "${#new_commit}" -ge 40 ] || \
       fail "remote HEAD for $origin_url is not a full commit ID"
     printf '%s\t%s\n' "$origin_url" "$new_commit" >>"$remote_heads"
+
+    awk '
+      $2 ~ /^refs\/tags\// {
+        ref = $2
+        sub(/^refs\/tags\//, "", ref)
+        if (ref ~ /\^\{\}$/) {
+          sub(/\^\{\}$/, "", ref)
+          peeled[ref] = $1
+        } else {
+          direct[ref] = $1
+        }
+      }
+      END {
+        for (ref in direct) {
+          print ref "\t" (ref in peeled ? peeled[ref] : direct[ref])
+        }
+      }
+    ' "$temporary_root/ls-remote" | LC_ALL=C sort \
+      >"$temporary_root/resolved-tags"
+    while IFS="$tab" read -r tag_name tag_commit; do
+      [ -n "$tag_name" ] || continue
+      case $tag_commit in
+        *[!0-9a-fA-F]*|'')
+          fail "tag $tag_name at $origin_url does not resolve to a commit ID"
+          ;;
+      esac
+      [ "${#tag_commit}" -ge 40 ] || \
+        fail "tag $tag_name at $origin_url does not use a full commit ID"
+      printf '%s\t%s\t%s\n' \
+        "$origin_url" "$tag_name" "$tag_commit" >>"$remote_tags"
+    done <"$temporary_root/resolved-tags"
   fi
 
-  if [ "$old_commit" != "$new_commit" ]; then
+  while IFS="$tab" read -r tag_origin tag_name tag_commit; do
+    [ "$tag_origin" = "$origin_url" ] || continue
+    case $tag_name in
+      "$crate_name"/v*) release_version=${tag_name#"$crate_name"/v} ;;
+      *) continue ;;
+    esac
+    semver_core_is_valid "$release_version" || continue
+    if awk -F '\t' -v crate="$crate_name" -v version="$release_version" '
+      $2 == crate && $3 == version { found = 1 }
+      END { exit !found }
+    ' "$catalog_inventory"; then
+      continue
+    fi
+    release_directory=${relative_manifest%/*}
+    release_manifest="$release_directory/$crate_name-$release_version.toml"
+    if awk -F '\t' -v manifest="$release_manifest" '
+      $2 == manifest { found = 1 }
+      END { exit !found }
+    ' "$release_plan"; then
+      continue
+    fi
+    if [ -e "$index_root/$release_manifest" ]; then
+      fail "release tag $tag_name would overwrite $release_manifest"
+    fi
+    subdir=$(origin_optional_field subdir "$index_root/$relative_manifest") || \
+      fail "$relative_manifest has an invalid [origin] subdir"
+    case $subdir in
+      *"$(printf '\t')"*)
+        fail "$relative_manifest contains a tab in its origin subdir"
+        ;;
+      /*|..|../*|*/..|*/../*)
+        fail "$relative_manifest has an unsafe [origin] subdir: $subdir"
+        ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative_manifest" "$release_manifest" "$crate_name" \
+      "$release_version" "$origin_url" "$tag_commit" "$tag_name" \
+      "$subdir" >>"$release_plan"
+  done <"$remote_tags"
+
+  if [ "$update_development" -eq 1 ] && \
+    awk -F '\t' -v manifest="$relative_manifest" '
+      $1 == manifest { found = 1 }
+      END { exit !found }
+    ' "$manifest_inventory" && [ "$old_commit" != "$new_commit" ]; then
     printf '%s\t%s\t%s\n' \
       "$relative_manifest" "$old_commit" "$new_commit" >>"$update_plan"
   fi
-done <"$manifest_inventory"
+done <"$release_sources"
 
-if [ ! -s "$update_plan" ]; then
-  printf '%s\n' "Selected development manifests already match their remote HEADs."
+if [ ! -s "$update_plan" ] && [ ! -s "$release_plan" ]; then
+  if [ "$update_development" -eq 1 ]; then
+    printf '%s\n' \
+      "No matching releases; selected development manifests already match their remote HEADs."
+  else
+    printf '%s\n' "No matching releases were found."
+  fi
   exit 0
 fi
+
+source_repository_count=0
+while IFS="$tab" read -r \
+  development_manifest release_manifest crate_name version origin_url \
+  tag_commit tag_name subdir; do
+  remote_url=${origin_url#git+}
+  source_repository=$(awk -F '\t' -v url="$origin_url" \
+    '$1 == url { print $2; exit }' "$source_repositories")
+  if [ -z "$source_repository" ]; then
+    source_repository_count=$((source_repository_count + 1))
+    source_repository="$temporary_root/source-$source_repository_count.git"
+    git init -q --bare "$source_repository"
+    printf '%s\t%s\n' \
+      "$origin_url" "$source_repository" >>"$source_repositories"
+  fi
+
+  printf '%s\n' "Publishing $tag_name from $origin_url..."
+  git --git-dir="$source_repository" fetch -q --depth=1 \
+    "$remote_url" "refs/tags/$tag_name" || \
+    fail "could not fetch release tag $tag_name from $origin_url"
+  fetched_commit=$(git --git-dir="$source_repository" \
+    rev-parse 'FETCH_HEAD^{commit}') || \
+    fail "release tag $tag_name does not resolve to a commit"
+  [ "$fetched_commit" = "$tag_commit" ] || \
+    fail "release tag $tag_name changed while the index was being updated"
+
+  source_manifest=${subdir:+$subdir/}alire.toml
+  candidate="$temporary_root/release-candidate"
+  git --git-dir="$source_repository" show \
+    "FETCH_HEAD:$source_manifest" >"$candidate" || \
+    fail "release tag $tag_name does not contain $source_manifest"
+  tagged_name=$(top_level_field name "$candidate") || \
+    fail "$source_manifest at $tag_name must contain exactly one quoted crate name"
+  tagged_version=$(top_level_field version "$candidate") || \
+    fail "$source_manifest at $tag_name must contain exactly one quoted version"
+  [ "$tagged_name" = "$crate_name" ] || \
+    fail "$source_manifest at $tag_name declares crate $tagged_name"
+  [ "$tagged_version" = "$version" ] || \
+    fail "$source_manifest at $tag_name declares version $tagged_version"
+  if awk '
+    /^[[:space:]]*\[origin\][[:space:]]*$/ { found = 1 }
+    END { exit !found }
+  ' "$candidate"; then
+    fail "$source_manifest at $tag_name already contains an [origin] table"
+  fi
+
+  destination="$index_root/$release_manifest"
+  cp "$candidate" "$destination"
+  printf '\n[origin]\ncommit = "%s"\n' "$tag_commit" >>"$destination"
+  if [ -n "$subdir" ]; then
+    printf 'subdir = "%s"\n' "$subdir" >>"$destination"
+  fi
+  printf 'url = "%s"\n' "$origin_url" >>"$destination"
+  printf '%s\n' "$release_manifest: published from $tag_name"
+done <"$release_plan"
 
 while IFS="$tab" read -r relative_manifest old_commit new_commit; do
   manifest="$index_root/$relative_manifest"
@@ -410,12 +585,31 @@ mkdir "$settings_dir"
 "$alr" -n -s "$settings_dir" index --check
 
 if [ "$commit_changes" -eq 1 ]; then
+  while IFS="$tab" read -r \
+    development_manifest release_manifest crate_name version origin_url \
+    tag_commit tag_name subdir; do
+    git -C "$index_root" add -- "$release_manifest"
+  done <"$release_plan"
   while IFS="$tab" read -r relative_manifest old_commit new_commit; do
     git -C "$index_root" add -- "$relative_manifest"
   done <"$update_plan"
 
   message_file="$temporary_root/commit-message"
-  cat >"$message_file" <<'EOF'
+  if [ -s "$release_plan" ]; then
+    cat >"$message_file" <<'EOF'
+Problem: Tagged crate releases are not indexed
+
+Stable releases published by their source repositories remain unavailable to
+Alire users until matching immutable manifests enter this index.
+
+Solution: Publish validated tagged crate releases
+
+Import each <crate>/v<version> release from its exact tagged source commit and
+record it as an immutable index manifest. Development source pins are advanced
+too unless the updater was invoked with --releases-only.
+EOF
+  else
+    cat >"$message_file" <<'EOF'
 Problem: Development index trails remote sources
 
 Development manifests no longer all resolve to the default-branch heads
@@ -426,6 +620,7 @@ Solution: Advance development source pins
 Update every changed development manifest to the exact current commit
 advertised by its remote default branch.
 EOF
+  fi
   git -C "$index_root" commit -F "$message_file"
 fi
 
@@ -437,7 +632,7 @@ if [ "$commit_changes" -eq 0 ]; then
   printf '%s\n' \
     "Validated updates are ready for review; rerun with --commit or --push."
 elif [ "$push_changes" -eq 0 ]; then
-  printf '%s\n' "Committed updates; use git push to publish them."
+  printf '%s\n' "Committed index updates; use git push to publish them."
 else
-  printf '%s\n' "Committed and pushed the development manifest updates."
+  printf '%s\n' "Committed and pushed the index updates."
 fi
