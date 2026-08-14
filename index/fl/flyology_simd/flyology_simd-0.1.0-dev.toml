@@ -14,5 +14,5 @@ project-files = ["flyology_simd.gpr"]
 gnat = "16.1.0"
 
 [origin]
-commit = "33c57b1f9782a53a48f5d9aabfb8f747e39f9a72"
+commit = "2ea5d892157d1efe5d1a402cbd26ea7c454dd1fa"
 url = "git+https://github.com/flyology-ada/flyology-simd.git"
