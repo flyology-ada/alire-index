@@ -90,21 +90,25 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn("Flyology primary icon", icon)
         self.assertNotIn(':root[data-theme="dark"] .brand img.brand-mark { filter: none; }', styles)
 
-    def test_home_page_has_a_bounded_mixed_change_preview(self) -> None:
+    def test_home_page_has_a_bounded_change_preview(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")
+        history = generate_site.load_change_history(self.catalog)
+        entry_count = sum(len(group["entries"]) for group in history)
         self.assertIn('href="changes/"', page)
         self.assertIn('id="changes-preview-title"', page)
-        self.assertEqual(page.count('class="change-entry '), generate_site.HOME_CHANGE_LIMIT)
-        self.assertIn("New version", page)
-        self.assertIn("Development update", page)
+        self.assertEqual(
+            page.count('class="change-entry '),
+            min(generate_site.HOME_CHANGE_LIMIT, entry_count),
+        )
 
     def test_detailed_change_history_is_generated_from_git(self) -> None:
         page = (self.output / "changes" / "index.html").read_text(encoding="utf-8")
+        history = generate_site.load_change_history(self.catalog)
+        self.assertTrue(history)
         self.assertIn('<a href="../changes/" aria-current="page">Changes</a>', page)
         self.assertIn("Index changes.", page)
-        self.assertIn("Compare source revisions", page)
-        self.assertIn("Dependency changes", page)
         self.assertIn(f"{generate_site.REPOSITORY_URL}/commit/", page)
+        self.assertIn(history[0]["commit"][:8], page)
 
     def test_change_entry_distinguishes_publication_and_dev_update(self) -> None:
         before = {
@@ -129,6 +133,15 @@ class GenerateSiteTests(unittest.TestCase):
         )
         self.assertEqual(published["kind"], "published")
         self.assertEqual(published["changed_fields"], [])
+        updated_html = generate_site.render_change_entry(
+            updated, root_prefix="", detailed=True
+        )
+        self.assertIn("Development update", updated_html)
+        self.assertIn("Compare source revisions", updated_html)
+        self.assertIn(
+            f"https://github.com/example/example/compare/{'a' * 40}...{'b' * 40}",
+            updated_html,
+        )
 
     def test_published_release_is_selected_over_newer_development(self) -> None:
         releases = [
