@@ -22,5 +22,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "938a5b2be0e477786fd338f2775839068ebd6115"
+commit = "25fc3b0afb1ad9cb6190f9dfbe9875675b01d134"
 url = "git+https://github.com/flyology-ada/flyology-tui.git"
