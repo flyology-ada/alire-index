@@ -140,12 +140,15 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertFalse(generate_site.is_development_version("16.1.0-patchset.1.1.0"))
 
     def test_package_selection_records_published_and_development_status(self) -> None:
-        flyology = next(package for package in self.catalog["packages"] if package["name"] == "flyology")
-        toolchain = next(package for package in self.catalog["packages"] if package["name"] == "gnat_flyology_native")
-        self.assertEqual(flyology["selected_version"], "0.1.0")
-        self.assertFalse(flyology["development_only"])
-        self.assertEqual(toolchain["selected_version"], "16.2.0-patchset.1.1.0")
-        self.assertFalse(toolchain["development_only"])
+        for package in self.catalog["packages"]:
+            selected = next(
+                release
+                for release in package["versions"]
+                if release["version"] == package["selected_version"]
+            )
+            development_only = all(release["development"] for release in package["versions"])
+            self.assertEqual(package["development_only"], development_only)
+            self.assertEqual(selected["development"], development_only)
 
     def test_crate_and_version_pages_are_generated(self) -> None:
         for package in self.catalog["packages"]:
