@@ -1,6 +1,6 @@
-name = "flyology_postgres_sql_v15"
-description = "Native PostgreSQL 15 parser and owned Ada AST"
-version = "0.1.0-dev"
+name = "flyology_postgres_sql_v18"
+description = "Native PostgreSQL 18 parser and owned Ada AST"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -8,12 +8,12 @@ maintainers-logins = ["yrashk"]
 licenses = "MIT OR Apache-2.0"
 website = "https://github.com/flyology-ada/flyology-postgres"
 tags = ["ada", "postgres", "sql", "parser", "ast"]
-project-files = ["sql_v15.gpr"]
+project-files = ["sql_v18.gpr"]
 
 [[depends-on]]
-flyology_postgres_sql_core = "~0.1.0-dev"
+flyology_postgres_sql_core = "~0.1.1-dev"
 
 [origin]
-commit = "d1124959298e7b4ab4f1b86074ea8db1adf7b99e"
-subdir = "sql/v15"
+commit = "92212697b11142f0b27220b0bc55640fe5c132d1"
+subdir = "sql/v18"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"

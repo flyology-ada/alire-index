@@ -1,6 +1,6 @@
 name = "flyology_postgres_sql_core"
 description = "Shared native runtime for versioned Flyology PostgreSQL parsers"
-version = "0.1.0-dev"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -11,9 +11,9 @@ tags = ["ada", "postgres", "sql", "parser"]
 project-files = ["sql_core.gpr"]
 
 [[depends-on]]
-flyology_postgres = "~0.1.0-dev"
+flyology_postgres = "~0.1.1-dev"
 
 [origin]
-commit = "d1124959298e7b4ab4f1b86074ea8db1adf7b99e"
+commit = "92212697b11142f0b27220b0bc55640fe5c132d1"
 subdir = "sql/core"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"

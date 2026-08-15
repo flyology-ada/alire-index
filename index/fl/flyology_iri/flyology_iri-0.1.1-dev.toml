@@ -1,6 +1,6 @@
 name = "flyology_iri"
 description = "Allocation-conscious URI, IRI, and URL reference parser"
-version = "0.1.0-dev"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -15,6 +15,6 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "945acd23931c4ce81d5c03f949bc2a5019a96c36"
+commit = "ddbba90dba757971afb2d5fda35e884ee3813fc2"
 subdir = "flyology_iri"
 url = "git+https://github.com/flyology-ada/flyology-http.git"

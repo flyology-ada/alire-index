@@ -1,6 +1,6 @@
 name = "flyology_tui"
 description = "A typed, declarative terminal user-interface toolkit for Ada"
-version = "0.1.0-dev"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -22,5 +22,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "25fc3b0afb1ad9cb6190f9dfbe9875675b01d134"
+commit = "b5e2193f8edcb2174eee9e5a460595e059d64377"
 url = "git+https://github.com/flyology-ada/flyology-tui.git"

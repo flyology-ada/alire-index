@@ -1,6 +1,6 @@
 name = "flyology_simd"
 description = "Portable, strongly typed SIMD foundations for Ada"
-version = "0.1.0-dev"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -14,5 +14,5 @@ project-files = ["flyology_simd.gpr"]
 gnat = "16.1.0"
 
 [origin]
-commit = "23f4233ce621debcedb06850c8e90a10f1523309"
+commit = "639849cc9c0f932af9e7e70f8a3d78ddc823b30c"
 url = "git+https://github.com/flyology-ada/flyology-simd.git"

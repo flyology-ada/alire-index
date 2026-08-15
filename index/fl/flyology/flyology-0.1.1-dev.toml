@@ -1,6 +1,6 @@
 name = "flyology"
 description = "Lightweight tasks with ordinary Ada semantics for the GNAT runtime"
-version = "0.1.0-dev"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
@@ -30,5 +30,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "02f4ab2c83a6f33c71c335065499d0c4d886b172"
+commit = "91d6a0f68fae07c866cb90011bf0c6369137f93c"
 url = "git+https://github.com/flyology-ada/flyology.git"

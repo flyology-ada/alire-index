@@ -1,23 +1,23 @@
-name = "flyology_quic"
-description = "Ada-native QUIC transport for Flyology tasks"
-version = "0.1.0-dev"
+name = "flyology_http"
+description = "HTTP client and server library for Flyology tasks"
+version = "0.1.1-dev"
 
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
 maintainers-logins = ["yrashk"]
 licenses = "MIT OR Apache-2.0"
 website = "https://http.flyology.org/"
-tags = ["ada", "quic", "transport", "udp"]
-project-files = ["flyology_quic.gpr"]
+tags = ["ada", "http", "client", "server", "websocket", "sse"]
+project-files = ["flyology_http.gpr"]
 
 [[depends-on]]
-flyology = "~0.1.0-dev"
+flyology = "~0.1.1-dev"
+flyology_quic = "*"
 
 [[actions]]
 type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "945acd23931c4ce81d5c03f949bc2a5019a96c36"
-subdir = "flyology_quic"
+commit = "ddbba90dba757971afb2d5fda35e884ee3813fc2"
 url = "git+https://github.com/flyology-ada/flyology-http.git"
