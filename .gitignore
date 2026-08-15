@@ -13,3 +13,6 @@ obj
 # Generated website artifact
 build/
 vendor/
+
+# Local Alire installation created by setup-alire
+alire_install/
