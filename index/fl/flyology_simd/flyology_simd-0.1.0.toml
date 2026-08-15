@@ -1,0 +1,25 @@
+name = "flyology_simd"
+description = "Portable, strongly typed SIMD foundations for Ada"
+version = "0.1.0"
+licenses = "MIT OR Apache-2.0"
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+website = "https://simd.flyology.org/"
+project-files = ["flyology_simd.gpr"]
+tags = ["simd", "vector", "portable", "neon", "sse2", "avx2"]
+
+[gpr-set-externals.'case(host-arch)']
+aarch64 = { FLYOLOGY_SIMD_ARCH = "aarch64" }
+x86-64 = { FLYOLOGY_SIMD_ARCH = "x86_64" }
+
+[build-switches]
+"*".ada_version = "Ada2022"
+development.optimization = "Debug"
+development.compile_checks = "Errors"
+release.optimization = "Performance"
+release.compile_checks = "Warnings"
+
+[origin]
+commit = "e7bb7caa224cc3805430ff7046aa09e087310f6a"
+url = "git+https://github.com/flyology-ada/flyology-simd.git"

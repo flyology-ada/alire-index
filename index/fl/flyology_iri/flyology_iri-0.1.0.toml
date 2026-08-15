@@ -1,0 +1,20 @@
+name = "flyology_iri"
+description = "Allocation-conscious URI, IRI, and URL reference parser"
+version = "0.1.0"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://http.flyology.org/guide/iri/"
+tags = ["ada", "uri", "iri", "url", "parser"]
+project-files = ["flyology_iri.gpr"]
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "110cd1db6a48769199c7f0b23a12555af668e46b"
+subdir = "flyology_iri"
+url = "git+https://github.com/flyology-ada/flyology-http.git"

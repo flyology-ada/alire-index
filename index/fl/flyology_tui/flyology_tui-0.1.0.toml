@@ -1,0 +1,26 @@
+name = "flyology_tui"
+description = "A typed, declarative terminal user-interface toolkit for Ada"
+version = "0.1.0"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://tui.flyology.org/"
+tags = ["ada", "tui", "terminal", "ui", "elm"]
+project-files = ["flyology_tui.gpr"]
+
+[[depends-on]]
+gnat = ">=13 & <17"
+
+[available.'case(os)']
+'linux|macos' = true
+'...' = false
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "4d55ed7dc52cd1a04da61dad548defa61f85db9e"
+url = "git+https://github.com/flyology-ada/flyology-tui.git"
