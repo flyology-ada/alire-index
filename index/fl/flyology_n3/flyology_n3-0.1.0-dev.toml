@@ -1,0 +1,26 @@
+name = "flyology_n3"
+description = "Notation3 parsing and serialization"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://rdf.flyology.org/"
+tags = ["ada", "rdf", "notation3", "n3", "parser"]
+project-files = ["flyology_n3.gpr"]
+
+[[depends-on]]
+flyology_rdf = "~0.1.0-dev"
+
+[build-switches]
+"*".ada_version = "Ada2022"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "a8dd2f3933ec70037cebd94102f4e4d2817f4244"
+subdir = "n3"
+url = "git+https://github.com/flyology-ada/flyology-rdf.git"
