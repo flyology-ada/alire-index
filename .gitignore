@@ -9,6 +9,7 @@ obj
 *.cgpr
 *.db
 *.xml
+__pycache__/
 
 # Generated website artifact
 build/
