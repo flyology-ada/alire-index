@@ -336,14 +336,15 @@ def version_set_admits(tree: tuple[Any, ...], version: Semver) -> bool:
     return not version_set_admits(tree[1], version)
 
 
-def requirement_admits(requirement: str, version: str) -> bool | None:
-    """Whether VERSION satisfies REQUIREMENT, or None when either is unreadable."""
-    try:
-        return version_set_admits(
-            parse_version_set(requirement), parse_semver(version, relaxed=True)
-        )
-    except VersionSyntaxError:
-        return None
+def requirement_admits(requirement: str, version: str) -> bool:
+    """Whether VERSION satisfies REQUIREMENT, by Alire's version set rules.
+
+    Raises VersionSyntaxError rather than guessing: a requirement the generator
+    cannot read is a requirement it cannot report on.
+    """
+    return version_set_admits(
+        parse_version_set(requirement), parse_semver(version, relaxed=True)
+    )
 
 
 def select_release(releases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -375,10 +376,23 @@ def provided_identities(
 
 
 def dependency_index(packages: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Map every required crate name to the indexed releases that require it."""
+    """Map every required crate name to the indexed releases that require it.
+
+    A dependency stated as a dynamic expression raises. Such an entry has no one
+    crate name and no one version set, so it would drop out of the index and
+    understate a crate's dependants without saying so.
+    """
     index: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for package in packages:
         for release in package["versions"]:
+            for group in release["manifest"].get("depends-on", []):
+                for required, requirement in group.items():
+                    if not isinstance(requirement, str):
+                        raise ValueError(
+                            f"{release['path']} declares {required!r} as a dynamic "
+                            "expression rather than a version set; the dependant "
+                            "index cannot resolve conditional dependencies"
+                        )
             for required, requirement in dependency_map(release["manifest"]).items():
                 index[required.lower()].append(
                     {
@@ -400,6 +414,11 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
     A requirement is resolved against the version the release carries under the
     name being required, so a toolchain that declares `provides = ["gnat=16.2.0"]`
     is matched against 16.2.0 rather than against its own crate version.
+
+    A version or requirement that cannot be parsed raises, naming the manifest
+    at fault. Reporting a dependant relation wrongly is worse than not building
+    the site, so an unreadable constraint stops generation instead of quietly
+    weakening one row.
     """
     index = dependency_index(packages)
     for package in packages:
@@ -408,17 +427,33 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
             for required, provided_version in provided_identities(
                 package["name"], release["version"], release["manifest"]
             ):
-                for record in index.get(required, []):
+                records = index.get(required, [])
+                if not records:
+                    continue
+                try:
+                    candidate = parse_semver(provided_version, relaxed=True)
+                except VersionSyntaxError as error:
+                    raise ValueError(
+                        f"{release['path']} provides {required} {provided_version!r}, "
+                        f"which is not a version Alire can parse: {error}"
+                    ) from error
+                for record in records:
                     if record["name"] == package["name"]:
                         continue
+                    try:
+                        version_set = parse_version_set(record["requirement"])
+                    except VersionSyntaxError as error:
+                        raise ValueError(
+                            f"{record['path']} requires {required} = "
+                            f"{record['requirement']!r}, which is not a version set "
+                            f"Alire can parse: {error}"
+                        ) from error
                     found.setdefault(
                         (record["name"], record["version"], required),
                         {
                             **record,
                             "provided_version": provided_version,
-                            "qualifies": requirement_admits(
-                                record["requirement"], provided_version
-                            ),
+                            "qualifies": version_set_admits(version_set, candidate),
                         },
                     )
             dependants: list[dict[str, Any]] = []
@@ -719,10 +754,8 @@ def counted(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def dependant_verdict(qualifies: bool | None) -> tuple[str, str]:
+def dependant_verdict(qualifies: bool) -> tuple[str, str]:
     """The CSS state and the label describing one dependant's requirement."""
-    if qualifies is None:
-        return "unknown", "Unreadable"
     return ("qualifies", "Qualifies") if qualifies else ("excluded", "Excluded")
 
 
@@ -735,7 +768,7 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
         identity = f'{record["requires"]} {record["provided_version"]}'
         if identity not in identities:
             identities.append(identity)
-    qualifying = sum(record["qualifies"] is True for record in dependants)
+    qualifying = sum(record["qualifies"] for record in dependants)
     tested = ", ".join(f"<code>{html.escape(identity)}</code>" for identity in identities)
     summary = (
         f"Resolved against {tested} — {qualifying} of "
@@ -1631,8 +1664,10 @@ crate the dependant asks for and provided_version is the version this release
 carries under that name, so a toolchain declaring provides = ["gnat=16.2.0"] is
 resolved as gnat 16.2.0. The requirement field is the declared version set and
 qualifies reports whether provided_version satisfies it, following Alire's
-semantic_versioning rules. qualifies is null when the requirement cannot be
-parsed. Dependants outside this index are not listed.
+semantic_versioning rules. Dependants outside this index are not listed.
+
+A version or version set the generator cannot parse fails site generation
+rather than producing a partial answer, so qualifies is always a boolean.
 
 Browser clients on other origins can fetch these files because GitHub Pages
 serves static assets with Access-Control-Allow-Origin: *.

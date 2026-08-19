@@ -211,9 +211,69 @@ class GenerateSiteTests(unittest.TestCase):
                     generate_site.requirement_admits(requirement, version), expected
                 )
 
-    def test_unreadable_requirements_do_not_fail_generation(self) -> None:
-        self.assertIsNone(generate_site.requirement_admits("not a version set", "1.0.0"))
-        self.assertIsNone(generate_site.requirement_admits("^1.0.0", "not a version"))
+    def test_unreadable_requirements_fail_generation(self) -> None:
+        for requirement, version in (("not a version set", "1.0.0"), ("^1.0.0", "not a version")):
+            with self.subTest(requirement=requirement, version=version):
+                with self.assertRaises(generate_site.VersionSyntaxError):
+                    generate_site.requirement_admits(requirement, version)
+
+        def package(name: str, manifest: dict) -> dict:
+            return {
+                "name": name,
+                "selected_version": "1.0.0",
+                "versions": [
+                    {
+                        "version": "1.0.0",
+                        "development": False,
+                        "path": f"index/xx/{name}/{name}-1.0.0.toml",
+                        "manifest": manifest,
+                    }
+                ],
+            }
+
+        #  A requirement the generator cannot read names the dependant manifest.
+        with self.assertRaises(ValueError) as raised:
+            generate_site.attach_dependants(
+                [
+                    package("base", {}),
+                    package("consumer", {"depends-on": [{"base": "wildly invalid"}]}),
+                ]
+            )
+        message = str(raised.exception)
+        self.assertIn("index/xx/consumer/consumer-1.0.0.toml", message)
+        self.assertIn("wildly invalid", message)
+        self.assertNotIn("index/xx/base/base-1.0.0.toml", message)
+
+        #  An unreadable provided version names the release that provides it.
+        with self.assertRaises(ValueError) as raised:
+            generate_site.attach_dependants(
+                [
+                    package("base", {"provides": ["stand_in=not a version"]}),
+                    package("consumer", {"depends-on": [{"stand_in": "^1.0.0"}]}),
+                ]
+            )
+        message = str(raised.exception)
+        self.assertIn("index/xx/base/base-1.0.0.toml", message)
+        self.assertIn("not a version", message)
+
+        #  A dynamic expression has no one crate name, so it would silently
+        #  drop out of the index rather than resolve to a dependant row.
+        with self.assertRaises(ValueError) as raised:
+            generate_site.attach_dependants(
+                [
+                    package("base", {}),
+                    package(
+                        "consumer",
+                        {"depends-on": [{"case(os)": {"linux": {"base": "^1.0.0"}}}]},
+                    ),
+                ]
+            )
+        message = str(raised.exception)
+        self.assertIn("index/xx/consumer/consumer-1.0.0.toml", message)
+        self.assertIn("case(os)", message)
+
+        #  An unreadable requirement nothing depends on cannot mislead anyone.
+        generate_site.attach_dependants([package("lonely", {"provides": ["ghost=not a version"]})])
 
     def test_dependants_mirror_every_declared_dependency(self) -> None:
         declared = {
@@ -339,7 +399,7 @@ class GenerateSiteTests(unittest.TestCase):
                 self.assertIn("dependants", release)
                 for record in release["dependants"]:
                     self.assertEqual(set(record), fields)
-                    self.assertIn(record["qualifies"], (True, False, None))
+                    self.assertIsInstance(record["qualifies"], bool)
 
     def test_pages_render_dependants_with_the_selected_version_in_bold(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
