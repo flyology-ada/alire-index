@@ -1,0 +1,26 @@
+name = "flyology_allocators"
+description = "Caller-owned memory allocation algorithms for Ada"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://flyology.org/"
+tags = ["ada", "allocators", "embedded", "memory", "systems"]
+project-files = ["flyology_allocators.gpr"]
+
+[[depends-on]]
+gnat = ">=13 & <17"
+
+[build-switches]
+"*" = { Compile_Checks = "warnings" }
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "9a24bf6849e172c6cd030d3df16e9c24b87fbd74"
+subdir = "flyology_allocators"
+url = "git+https://github.com/flyology-ada/flyology.git"

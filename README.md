@@ -140,6 +140,7 @@ Run the updater's isolated local-remote test with:
 ## Packages
 
 - `flyology` `0.1.0-dev`
+- `flyology_allocators` `0.1.0-dev`
 - `flyology_bench` `0.1.0-dev`
 - `flyology_cachelines` `0.1.0-dev`
 - `flyology_debug` `0.1.0-dev`
