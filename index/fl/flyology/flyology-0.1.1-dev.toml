@@ -12,6 +12,7 @@ project-files = ["flyology.gpr"]
 
 [[depends-on]]
 gnat = ">=13 & <17"
+flyology_allocators = "~0.1.0-dev"
 
 [available.'case(os)']
 'linux|macos' = true
