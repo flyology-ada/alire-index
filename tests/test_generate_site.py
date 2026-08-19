@@ -35,7 +35,7 @@ class GenerateSiteTests(unittest.TestCase):
 
     def test_json_preserves_the_complete_manifest(self) -> None:
         aggregate = json.loads((self.output / "crates.json").read_text(encoding="utf-8"))
-        self.assertEqual(aggregate["schema_version"], 2)
+        self.assertEqual(aggregate["schema_version"], 3)
         for package in aggregate["packages"]:
             package_file = json.loads((self.output / "crates" / f"{generate_site.segment(package['name'])}.json").read_text(encoding="utf-8"))
             self.assertEqual(package_file["package"], package)
@@ -175,6 +175,210 @@ class GenerateSiteTests(unittest.TestCase):
                 self.assertIn(f'<span aria-current="page">{release["version"]}</span>', version_page)
                 self.assertIn('Complete manifest as JSON', version_page)
                 self.assertIn(f'href="../{version}/"', version_page)
+
+    def test_version_sets_follow_alire_semantics(self) -> None:
+        #  Verified against Semantic_Versioning as built by Alire; note that '~'
+        #  stays within the minor series and that pre-releases are not excluded.
+        expectations = [
+            ("*", "16.2.0", True),
+            ("any", "16.2.0", True),
+            ("~0.1.0", "0.1.0", True),
+            ("~0.1.0", "0.1.1-dev", True),
+            ("~0.1.0", "0.2.0", False),
+            ("~0.1.1-dev", "0.1.0", False),
+            ("~0.1.1-dev", "0.1.1", True),
+            ("^0.2.0", "0.9.0", True),
+            ("^0.2.0", "1.0.0", False),
+            ("^1.0.0", "0.9.9", False),
+            (">=13 & <17", "13.2.0", True),
+            (">=13 & <17", "16.1.0-patchset.1.1.0", True),
+            (">=13 & <17", "17.0.0", False),
+            ("16.1.0", "16.1.0", True),
+            ("16.1.0", "16.2.0", False),
+            (">1.0.0", "1.0.0", False),
+            ("/=1.0.0", "1.0.0", False),
+            ("^1 | ^2", "2.3.0", True),
+            ("^1 | ^2", "3.0.0", False),
+            ("!^1", "2.0.0", True),
+            ("(>=1 & <2) | =3.0.0", "3.0.0", True),
+            ("\u22651.0.0", "1.5.0", True),
+            ("0.1.0-alpha.2", "0.1.0-alpha.10", False),
+            (">=0.1.0-alpha.2", "0.1.0-alpha.10", True),
+        ]
+        for requirement, version, expected in expectations:
+            with self.subTest(requirement=requirement, version=version):
+                self.assertIs(
+                    generate_site.requirement_admits(requirement, version), expected
+                )
+
+    def test_unreadable_requirements_do_not_fail_generation(self) -> None:
+        self.assertIsNone(generate_site.requirement_admits("not a version set", "1.0.0"))
+        self.assertIsNone(generate_site.requirement_admits("^1.0.0", "not a version"))
+
+    def test_dependants_mirror_every_declared_dependency(self) -> None:
+        declared = {
+            (package["name"], release["version"], required.lower()): requirement
+            for package in self.catalog["packages"]
+            for release in package["versions"]
+            for required, requirement in generate_site.dependency_map(
+                release["manifest"]
+            ).items()
+        }
+        recorded = {
+            (record["name"], record["version"], record["requires"]): record["requirement"]
+            for package in self.catalog["packages"]
+            for release in package["versions"]
+            for record in release["dependants"]
+        }
+        #  Every recorded dependant restates a dependency the manifest declares,
+        #  and every dependency on an indexed crate is recorded somewhere.
+        self.assertTrue(recorded)
+        for identity, requirement in recorded.items():
+            self.assertEqual(declared[identity], requirement)
+        indexed = {
+            name
+            for package in self.catalog["packages"]
+            for release in package["versions"]
+            for name, _version in generate_site.provided_identities(
+                package["name"], release["version"], release["manifest"]
+            )
+        }
+        self.assertEqual(
+            {identity for identity in declared if identity[2] in indexed},
+            set(recorded),
+        )
+
+    def test_dependants_are_grouped_by_crate_and_newest_first(self) -> None:
+        for package in self.catalog["packages"]:
+            for release in package["versions"]:
+                names = [record["name"] for record in release["dependants"]]
+                self.assertEqual(names, sorted(names))
+                self.assertNotIn(package["name"], names)
+                for name in set(names):
+                    versions = [
+                        record["version"]
+                        for record in release["dependants"]
+                        if record["name"] == name
+                    ]
+                    self.assertEqual(
+                        versions,
+                        sorted(versions, key=generate_site.version_key, reverse=True),
+                    )
+                for record in release["dependants"]:
+                    selected = next(
+                        candidate["selected_version"]
+                        for candidate in self.catalog["packages"]
+                        if candidate["name"] == record["name"]
+                    )
+                    self.assertEqual(record["selected"], record["version"] == selected)
+
+    def test_dependants_resolve_through_provided_crate_identities(self) -> None:
+        toolchain = next(
+            package
+            for package in self.catalog["packages"]
+            if package["name"] == "gnat_flyology_native"
+        )
+        self.assertEqual(
+            generate_site.provided_identities(
+                "gnat_flyology_native",
+                "16.2.0-patchset.1.1.0",
+                {"provides": ["gnat=16.2.0"]},
+            ),
+            [("gnat_flyology_native", "16.2.0-patchset.1.1.0"), ("gnat", "16.2.0")],
+        )
+        #  flyology_simd pins gnat 16.1.0, so only the 16.1.0 patchsets qualify.
+        for release in toolchain["versions"]:
+            simd = next(
+                record
+                for record in release["dependants"]
+                if record["name"] == "flyology_simd"
+            )
+            self.assertEqual(simd["requires"], "gnat")
+            self.assertEqual(simd["requirement"], "16.1.0")
+            self.assertEqual(
+                simd["qualifies"], release["version"].startswith("16.1.0")
+            )
+            self.assertEqual(
+                simd["provided_version"], release["version"].partition("-")[0]
+            )
+
+    def test_dependants_qualify_against_the_version_on_the_page(self) -> None:
+        core = next(
+            package
+            for package in self.catalog["packages"]
+            if package["name"] == "flyology_postgres_sql_core"
+        )
+        published = generate_site.release_for(core, "0.1.0")
+        development = generate_site.release_for(core, "0.1.1-dev")
+        #  A '~0.1.1-dev' dependant is excluded by 0.1.0 but admitted by 0.1.1-dev.
+        for release, expected in ((published, False), (development, True)):
+            record = next(
+                item
+                for item in release["dependants"]
+                if item["name"] == "flyology_postgres_sql_v14"
+                and item["version"] == "0.1.1-dev"
+            )
+            self.assertEqual(record["requirement"], "~0.1.1-dev")
+            self.assertIs(record["qualifies"], expected)
+
+    def test_json_records_dependants_for_every_release(self) -> None:
+        aggregate = json.loads((self.output / "crates.json").read_text(encoding="utf-8"))
+        fields = {
+            "name",
+            "version",
+            "development",
+            "selected",
+            "path",
+            "requires",
+            "requirement",
+            "provided_version",
+            "qualifies",
+        }
+        for package in aggregate["packages"]:
+            for release in package["versions"]:
+                self.assertIn("dependants", release)
+                for record in release["dependants"]:
+                    self.assertEqual(set(record), fields)
+                    self.assertIn(record["qualifies"], (True, False, None))
+
+    def test_pages_render_dependants_with_the_selected_version_in_bold(self) -> None:
+        home = (self.output / "index.html").read_text(encoding="utf-8")
+        crate = (self.output / "crates" / "flyology" / "index.html").read_text(encoding="utf-8")
+        version = (
+            self.output / "crates" / "gnat_flyology_native" / "16.2.0-patchset.1.1.0" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(home.count(">Dependants</h4>"), len(self.catalog["packages"]))
+        self.assertIn(
+            'Resolved against <code>flyology 0.1.0</code> — 3 of 6 dependant releases qualify.',
+            crate,
+        )
+        self.assertIn(
+            '<a href="../../crates/flyology_http/0.1.0/"><strong>0.1.0</strong>'
+            '<span class="visually-hidden"> (selected version)</span></a>'
+            '<code>~0.1.0</code><span class="dependant-verdict">Qualifies</span>',
+            crate,
+        )
+        self.assertIn(
+            '<a href="../../crates/flyology_http/0.1.1-dev/">0.1.1-dev</a>'
+            '<code>~0.1.1-dev</code><span class="dependant-verdict">Excluded</span>',
+            crate,
+        )
+        #  A provided identity names the crate it stands in for.
+        self.assertIn('Resolved against <code>gnat 16.2.0</code>', version)
+        self.assertIn('<code>gnat 16.1.0</code><span class="dependant-verdict">Excluded</span>', version)
+        self.assertIn('<code>gnat &gt;=13 &amp; &lt;17</code>', version)
+
+    def test_crates_without_dependants_say_so(self) -> None:
+        page = (self.output / "crates" / "flyology_http" / "index.html").read_text(encoding="utf-8")
+        package = next(
+            candidate
+            for candidate in self.catalog["packages"]
+            if candidate["name"] == "flyology_http"
+        )
+        selected = generate_site.release_for(package, package["selected_version"])
+        self.assertEqual(selected["dependants"], [])
+        self.assertIn("No indexed release depends on this version.", page)
 
     def test_install_command_has_shell_line_continuations(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")

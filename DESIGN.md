@@ -50,8 +50,8 @@ wall of detached cards.
 The index has three levels: an introductory band with the Alire setup command,
 a search and type filter, and one semantic disclosure per crate. Each closed
 disclosure shows the crate name, selected release, description, and status. Its
-open state presents that release's structured metadata and direct links to
-other versions. Dedicated crate and version routes render the complete release
+open state presents that release's structured metadata, its dependencies and
+dependants, and direct links to other versions. Dedicated crate and version routes render the complete release
 without duplicating every manifest on the front page.
 
 ## Components
@@ -61,6 +61,10 @@ without duplicating every manifest on the front page.
 - Crate disclosures are full-width rows with one-pixel separators. Hover and
   open states use tonal surfaces, not decorative shadows.
 - Version labels and executable values use the shared mono stack.
+- Dependant lists group by crate on a tonal surface, newest version first.
+  The dependant's own selected version is bold, and each row ends with a
+  verdict in a right-aligned rail so qualification scans vertically. The
+  verdict is carried by its wording, not by colour alone.
 - Violet identifies interactive/current state. Teal identifies source and
   availability facts; neither is used as interchangeable decoration.
 - JSON and repository links use the website kit's standard primary and

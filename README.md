@@ -31,7 +31,13 @@ package:
 LLM-oriented catalog discovery is available at
 `https://crates.flyology.org/llms.txt`.
 
-Both forms contain the complete parsed manifest for every indexed version.
+Both forms contain the complete parsed manifest for every indexed version,
+along with the indexed releases that depend on it. Each dependant records the
+version set it declares and whether that requirement is satisfied, resolved
+through `provides` so a dependency on `gnat` is matched against the version a
+toolchain stands in for. Requirements are evaluated with Alire's
+`semantic_versioning` rules.
+
 Human-readable routes include:
 
 - `https://crates.flyology.org/crates/<package-name>/`

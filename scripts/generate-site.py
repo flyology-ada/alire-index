@@ -15,14 +15,15 @@ import sys
 import tomllib
 from collections import defaultdict
 from datetime import UTC, date, datetime, time
+from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_URL = "https://crates.flyology.org/"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CHANGE_HISTORY_LIMIT = 200
 HOME_CHANGE_LIMIT = 6
 REPOSITORY_URL = "https://github.com/flyology-ada/alire-index"
@@ -63,6 +64,288 @@ def is_development_version(version: str) -> bool:
     return "dev" in re.split(r"[.-]", prerelease.lower())
 
 
+class VersionSyntaxError(ValueError):
+    """Raised when a version or a dependency version set cannot be parsed."""
+
+
+class Semver(NamedTuple):
+    """A parsed semantic version. Build metadata never affects ordering."""
+
+    major: int
+    minor: int
+    patch: int
+    pre_release: str
+    build: str
+
+
+DIGITS = "0123456789"
+
+#  Operators recognised by Semantic_Versioning.Basic, longest match first.
+RELATIONAL_OPERATORS = (
+    ("/=", "/="),
+    ("\u2260", "/="),
+    (">=", ">="),
+    ("\u2265", ">="),
+    ("<=", "<="),
+    ("\u2264", "<="),
+    (">", ">"),
+    ("<", "<"),
+)
+
+
+def parse_semver(description: str, *, relaxed: bool = False) -> Semver:
+    """Parse DESCRIPTION the way Alire's semantic_versioning parser does.
+
+    Relaxed parsing stores whatever it cannot read as build metadata, which is
+    how Alire reads the version of an indexed release. Dependency version sets
+    are parsed strictly, so a malformed constraint is reported rather than
+    silently reinterpreted.
+    """
+    points = [0, 0, 0]
+    pre_release = ""
+    build = ""
+    position = 0
+    seen = 0
+
+    def eat_number() -> int:
+        nonlocal position
+        if position >= len(description) or description[position] not in DIGITS:
+            raise VersionSyntaxError(f"expected a version number in {description!r}")
+        last = position
+        while last < len(description) and description[last] in DIGITS:
+            last += 1
+        number = int(description[position:last])
+        position = last
+        return number
+
+    def accept_build() -> None:
+        nonlocal build, position
+        build = description[position:]
+        position = len(description)
+
+    def accept_pre_release() -> None:
+        nonlocal pre_release, position
+        if position >= len(description):
+            raise VersionSyntaxError(f"empty pre-release part in {description!r}")
+        last = position + 1
+        while last < len(description) and description[last] != "+":
+            last += 1
+        pre_release = description[position:last]
+        position = last
+        if position < len(description):
+            position += 1
+            accept_build()
+
+    if position >= len(description) or description[position] not in DIGITS:
+        raise VersionSyntaxError(f"expected a major number in {description!r}")
+    while True:
+        try:
+            points[seen] = eat_number()
+        except VersionSyntaxError:
+            if seen == 0 or not relaxed:
+                raise
+            position -= 1
+            accept_build()
+        seen += 1
+        if position >= len(description):
+            break
+        separator = description[position]
+        if separator == "." and seen < 3:
+            position += 1
+            continue
+        if separator == ".":
+            if not relaxed:
+                raise VersionSyntaxError(f"too many points in {description!r}")
+            position += 1
+            accept_build()
+        elif separator == "-":
+            position += 1
+            accept_pre_release()
+        elif separator == "+":
+            position += 1
+            accept_build()
+        elif relaxed:
+            accept_build()
+        else:
+            raise VersionSyntaxError(f"invalid separator in {description!r}")
+        break
+    return Semver(points[0], points[1], points[2], pre_release, build)
+
+
+def pre_release_precedes(left: str, right: str) -> bool:
+    """Order pre-release labels; a pre-release precedes its plain release."""
+    if bool(left) != bool(right):
+        return bool(left)
+    left_parts = [part for part in left.split(".") if part]
+    right_parts = [part for part in right.split(".") if part]
+    for index in range(max(len(left_parts), len(right_parts))):
+        if index >= len(right_parts):
+            return False
+        if index >= len(left_parts):
+            return True
+        left_part, right_part = left_parts[index], right_parts[index]
+        try:
+            left_number, right_number = int(left_part), int(right_part)
+        except ValueError:
+            if left_part != right_part:
+                return left_part < right_part
+            continue
+        if left_number != right_number:
+            return left_number < right_number
+    return False
+
+
+def semver_precedes(left: Semver, right: Semver) -> bool:
+    left_points = (left.major, left.minor, left.patch)
+    right_points = (right.major, right.minor, right.patch)
+    if left_points != right_points:
+        return left_points < right_points
+    return pre_release_precedes(left.pre_release, right.pre_release)
+
+
+def semver_equivalent(left: Semver, right: Semver) -> bool:
+    return (left.major, left.minor, left.patch, left.pre_release) == (
+        right.major,
+        right.minor,
+        right.patch,
+        right.pre_release,
+    )
+
+
+def parse_basic_set(expression: str, *, relaxed: bool = False) -> tuple[tuple[str, Semver], ...]:
+    """Parse one '&'-free restriction, e.g. '^1.2.0', '>=13' or '*'."""
+    if expression.lower() == "any" or expression == "*":
+        return ()
+    if not expression:
+        raise VersionSyntaxError("empty version set")
+    if expression[0] in DIGITS:
+        return (("=", parse_semver(expression, relaxed=relaxed)),)
+    if expression[0] in "=^~":
+        return ((expression[0], parse_semver(expression[1:], relaxed=relaxed)),)
+    for prefix, operator in RELATIONAL_OPERATORS:
+        if not expression.startswith(prefix):
+            continue
+        bound = parse_semver(expression[len(prefix):], relaxed=relaxed)
+        if operator == ">":
+            return ((">=", bound), ("/=", bound))
+        if operator == "<":
+            return (("<=", bound), ("/=", bound))
+        return ((operator, bound),)
+    raise VersionSyntaxError(f"invalid version set: {expression!r}")
+
+
+def parse_version_set(expression: str, *, relaxed: bool = False) -> tuple[Any, ...]:
+    """Parse an Alire dependency version set, including '&', '|', '!' and groups."""
+    if expression.lower() == "any" or expression == "*":
+        return ("set", ())
+    position = 0
+    length = len(expression)
+
+    def next_token() -> str:
+        nonlocal position
+        while position < length and expression[position] == " ":
+            position += 1
+        if position >= length:
+            return "end"
+        character = expression[position]
+        if character in "<>=/~^" or character in "\u2260\u2265\u2264":
+            return "set"
+        return {"&": "and", "(": "open", ")": "close", "|": "or", "!": "not"}.get(
+            character, "set" if character in DIGITS else "unknown"
+        )
+
+    def match(character: str) -> None:
+        nonlocal position
+        if position >= length or expression[position] != character:
+            raise VersionSyntaxError(f"expected {character!r} in {expression!r}")
+        position += 1
+
+    def next_basic_set() -> str:
+        nonlocal position
+        last = position
+        while last < length and expression[last] not in "&|() ":
+            last += 1
+        if last == position:
+            raise VersionSyntaxError(f"empty version set in {expression!r}")
+        restriction = expression[position:last]
+        position = last
+        return restriction
+
+    def parse_operand(kind: str, *, with_list: bool) -> tuple[Any, ...]:
+        token = next_token()
+        if token == "not":
+            match("!")
+            child = parse_operand(kind, with_list=False)
+            if child[0] == "not":
+                raise VersionSyntaxError(f"double negation in {expression!r}")
+            node: tuple[Any, ...] = ("not", child)
+        elif token == "open":
+            match("(")
+            node = parse_operand("any", with_list=True)
+            match(")")
+        elif token == "set":
+            node = ("set", parse_basic_set(next_basic_set(), relaxed=relaxed))
+        else:
+            raise VersionSyntaxError(f"unexpected symbol in {expression!r}")
+        if with_list and next_token() in ("and", "or"):
+            return parse_list(node, kind)
+        return node
+
+    def parse_list(head: tuple[Any, ...], kind: str) -> tuple[Any, ...]:
+        if kind == "any":
+            token = next_token()
+            if token not in ("and", "or"):
+                raise VersionSyntaxError(f"unexpected list operator in {expression!r}")
+            return parse_list(head, token)
+        if position < length and expression[position] == ("|" if kind == "and" else "&"):
+            raise VersionSyntaxError(f"cannot mix '&' and '|' in {expression!r}; use parentheses")
+        match("&" if kind == "and" else "|")
+        return (kind, head, parse_operand(kind, with_list=True))
+
+    tree = parse_operand("any", with_list=True)
+    if next_token() != "end":
+        raise VersionSyntaxError(f"trailing input in {expression!r}")
+    return tree
+
+
+def restriction_admits(version: Semver, restriction: tuple[str, Semver]) -> bool:
+    operator, bound = restriction
+    at_least = semver_precedes(bound, version) or semver_equivalent(bound, version)
+    if operator == ">=":
+        return at_least
+    if operator == "<=":
+        return semver_precedes(version, bound) or semver_equivalent(version, bound)
+    if operator == "=":
+        return semver_equivalent(version, bound)
+    if operator == "/=":
+        return not semver_equivalent(version, bound)
+    if operator == "^":
+        return at_least and bound.major == version.major
+    #  '~' stays within the minor series, unlike most tilde implementations.
+    return at_least and bound.major == version.major and bound.minor == version.minor
+
+
+def version_set_admits(tree: tuple[Any, ...], version: Semver) -> bool:
+    kind = tree[0]
+    if kind == "set":
+        return all(restriction_admits(version, restriction) for restriction in tree[1])
+    if kind == "and":
+        return version_set_admits(tree[1], version) and version_set_admits(tree[2], version)
+    if kind == "or":
+        return version_set_admits(tree[1], version) or version_set_admits(tree[2], version)
+    return not version_set_admits(tree[1], version)
+
+
+def requirement_admits(requirement: str, version: str) -> bool | None:
+    """Whether VERSION satisfies REQUIREMENT, or None when either is unreadable."""
+    try:
+        return version_set_admits(
+            parse_version_set(requirement), parse_semver(version, relaxed=True)
+        )
+    except VersionSyntaxError:
+        return None
+
+
 def select_release(releases: list[dict[str, Any]]) -> dict[str, Any]:
     """Prefer the newest published release, falling back to the newest dev."""
     return next(
@@ -77,6 +360,80 @@ def release_for(package: dict[str, Any], version: str) -> dict[str, Any]:
 
 def segment(value: str) -> str:
     return quote(value, safe="")
+
+
+def provided_identities(
+    name: str, version: str, manifest: dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Crate identities a release satisfies: its own plus every `provides` alias."""
+    identities = {name.lower(): version}
+    provides = manifest.get("provides") or []
+    for entry in [provides] if isinstance(provides, str) else provides:
+        alias, separator, provided = str(entry).partition("=")
+        identities.setdefault(alias.strip().lower(), provided.strip() if separator else version)
+    return list(identities.items())
+
+
+def dependency_index(packages: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Map every required crate name to the indexed releases that require it."""
+    index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for package in packages:
+        for release in package["versions"]:
+            for required, requirement in dependency_map(release["manifest"]).items():
+                index[required.lower()].append(
+                    {
+                        "name": package["name"],
+                        "version": release["version"],
+                        "development": release["development"],
+                        "selected": release["version"] == package["selected_version"],
+                        "path": release["path"],
+                        "requires": required.lower(),
+                        "requirement": requirement,
+                    }
+                )
+    return index
+
+
+def attach_dependants(packages: list[dict[str, Any]]) -> None:
+    """Record, on every release, the indexed releases that depend on it.
+
+    A requirement is resolved against the version the release carries under the
+    name being required, so a toolchain that declares `provides = ["gnat=16.2.0"]`
+    is matched against 16.2.0 rather than against its own crate version.
+    """
+    index = dependency_index(packages)
+    for package in packages:
+        for release in package["versions"]:
+            found: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for required, provided_version in provided_identities(
+                package["name"], release["version"], release["manifest"]
+            ):
+                for record in index.get(required, []):
+                    if record["name"] == package["name"]:
+                        continue
+                    found.setdefault(
+                        (record["name"], record["version"], required),
+                        {
+                            **record,
+                            "provided_version": provided_version,
+                            "qualifies": requirement_admits(
+                                record["requirement"], provided_version
+                            ),
+                        },
+                    )
+            dependants: list[dict[str, Any]] = []
+            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for record in found.values():
+                grouped[record["name"]].append(record)
+            for name in sorted(grouped):
+                dependants.extend(
+                    sorted(
+                        grouped[name],
+                        key=lambda record: version_key(record["version"]),
+                        reverse=True,
+                    )
+                )
+            release["dependants"] = dependants
 
 
 def load_catalog(source: Path) -> dict[str, Any]:
@@ -120,6 +477,7 @@ def load_catalog(source: Path) -> dict[str, Any]:
                 "versions": releases,
             }
         )
+    attach_dependants(packages)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -357,6 +715,67 @@ def dependency_rows(manifest: dict[str, Any]) -> str:
     return '<ul class="dependency-list">' + "".join(rows) + "</ul>"
 
 
+def counted(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def dependant_verdict(qualifies: bool | None) -> tuple[str, str]:
+    """The CSS state and the label describing one dependant's requirement."""
+    if qualifies is None:
+        return "unknown", "Unreadable"
+    return ("qualifies", "Qualifies") if qualifies else ("excluded", "Excluded")
+
+
+def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str) -> str:
+    dependants = release["dependants"]
+    if not dependants:
+        return '<p class="quiet">No indexed release depends on this version.</p>'
+    identities: list[str] = []
+    for record in dependants:
+        identity = f'{record["requires"]} {record["provided_version"]}'
+        if identity not in identities:
+            identities.append(identity)
+    qualifying = sum(record["qualifies"] is True for record in dependants)
+    tested = ", ".join(f"<code>{html.escape(identity)}</code>" for identity in identities)
+    summary = (
+        f"Resolved against {tested} — {qualifying} of "
+        f'{counted(len(dependants), "dependant release")} '
+        f'{"qualifies" if qualifying == 1 else "qualify"}.'
+    )
+    groups = []
+    for name, records in groupby(dependants, key=lambda record: record["name"]):
+        rows = []
+        for record in records:
+            state, label = dependant_verdict(record["qualifies"])
+            version = html.escape(record["version"])
+            if record["selected"]:
+                version = (
+                    f"<strong>{version}</strong>"
+                    '<span class="visually-hidden"> (selected version)</span>'
+                )
+            requirement = record["requirement"]
+            if record["requires"] != package_name.lower():
+                requirement = f'{record["requires"]} {requirement}'
+            href = f'{root_prefix}crates/{segment(record["name"])}/{segment(record["version"])}/'
+            rows.append(
+                f'<li class="dependant-release dependant-release-{state}">'
+                f'<a href="{html.escape(href, quote=True)}">{version}</a>'
+                f"<code>{html.escape(requirement)}</code>"
+                f'<span class="dependant-verdict">{label}</span>'
+                "</li>"
+            )
+        groups.append(
+            '<li class="dependant-group">'
+            f'<a class="dependant-name" href="{root_prefix}crates/{segment(name)}/">{html.escape(name)}</a>'
+            f'<ul class="dependant-releases">{"".join(rows)}</ul>'
+            "</li>"
+        )
+    return (
+        f'<p class="quiet dependant-summary">{summary}</p>'
+        f'<ul class="dependant-list">{"".join(groups)}</ul>'
+    )
+
+
 def origin_summary(manifest: dict[str, Any]) -> str:
     origin = manifest.get("origin")
     if not origin:
@@ -400,6 +819,7 @@ def render_release_detail(
     *,
     heading_level: int,
     raw_expanded: bool,
+    root_prefix: str,
 ) -> str:
     manifest = release["manifest"]
     raw = html.escape(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True))
@@ -415,6 +835,10 @@ def render_release_detail(
         <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
           <{child_heading} id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</{child_heading}>
           {dependency_rows(manifest)}
+        </section>
+        <section class="detail-section" aria-labelledby="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">
+          <{child_heading} id="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">Dependants</{child_heading}>
+          {dependant_rows(package_name, release, root_prefix)}
         </section>
         <details class="raw-manifest"{' open' if raw_expanded else ''}>
           <summary>Complete manifest as JSON</summary>
@@ -499,7 +923,7 @@ def render_package(package: dict[str, Any]) -> str:
           </span>
         </div>
         <div class="package-release-layout">
-          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False)}
+          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False, root_prefix='')}
           {render_version_links(package, context='home', current_version=selected['version'], exclude_current=True, title='Other versions')}
         </div>
       </div>
@@ -912,7 +1336,7 @@ def render_detail_page(
         </div>
       </header>
       <div class="detail-page-layout">
-        {render_release_detail(name, release, heading_level=2, raw_expanded=True)}
+        {render_release_detail(name, release, heading_level=2, raw_expanded=True, root_prefix=root_prefix)}
         {render_version_links(package, context=version_context, current_version=version, exclude_current=False, title='Indexed versions')}
       </div>
     </main>
@@ -1006,6 +1430,17 @@ INDEX_CSS = r"""
 .dependency-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
 .dependency-list li { display: grid; grid-template-columns: minmax(10rem, .3fr) 1fr; padding: .55rem .7rem; gap: 1rem; background: var(--surface); font-size: .76rem; }
 .dependency-list span { color: var(--ink-soft); font-family: var(--font-mono); }
+.dependant-summary { margin: 0 0 .7rem; }
+.dependant-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
+.dependant-group { padding: .6rem .7rem; background: var(--surface); }
+.dependant-name { display: inline-block; font-size: .76rem; font-weight: 620; }
+.dependant-releases { display: grid; margin: .45rem 0 0; padding: 0; gap: .3rem; list-style: none; }
+.dependant-release { display: grid; grid-template-columns: minmax(7rem, .28fr) minmax(0, 1fr) 5.4rem; align-items: baseline; gap: .9rem; font-size: .74rem; }
+.dependant-release > a { color: var(--ink); font-family: var(--font-mono); overflow-wrap: anywhere; text-decoration: none; }
+.dependant-release > a:hover { color: var(--violet-deep); text-decoration: underline; }
+.dependant-release code { color: var(--ink-soft); font-size: .7rem; overflow-wrap: anywhere; }
+.dependant-verdict { justify-self: end; color: var(--ink-soft); font: 620 .62rem var(--font-sans); letter-spacing: .035em; white-space: nowrap; }
+.dependant-release-qualifies .dependant-verdict { color: var(--teal-deep); }
 .raw-manifest { margin-top: 1.5rem; }
 .raw-manifest > summary { display: inline-flex; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: .76rem; font-weight: 600; cursor: pointer; list-style: none; }
 .raw-manifest pre { max-height: 32rem; margin: .7rem 0 0; padding: 1rem; overflow: auto; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); font-size: .72rem; line-height: 1.65; }
@@ -1095,6 +1530,11 @@ INDEX_CSS = r"""
   .package-body { padding-inline: .35rem; }
   .package-links { width: 100%; margin-left: 0; }
   .metadata div, .dependency-list li { grid-template-columns: 1fr; gap: .3rem; }
+  .dependant-releases { gap: .55rem; }
+  .dependant-release { grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .8rem; }
+  .dependant-release > a { grid-area: 1 / 1; }
+  .dependant-release .dependant-verdict { grid-area: 1 / 2; }
+  .dependant-release code { grid-area: 2 / 1 / 3 / -1; }
   .version-links a { grid-template-columns: 1fr; }
   .version-link-status { justify-content: flex-start; }
 }
@@ -1171,7 +1611,7 @@ INDEX_JS = r"""
 README_TEXT = """Flyology crate index JSON
 ==========================
 
-crates.json is the aggregate catalog. Its schema_version is currently 2.
+crates.json is the aggregate catalog. Its schema_version is currently 3.
 Each crates/<name>.json file contains the same package object plus the catalog
 schema_version, generated_at, canonical_url, and index metadata.
 
@@ -1182,6 +1622,17 @@ is the newest development release.
 Every version has a path and manifest field. The manifest is a lossless JSON
 representation of the corresponding TOML manifest, subject only to TOML date
 and time values being represented as ISO 8601 strings.
+
+Every version also has a dependants array listing the indexed releases that
+depend on it, grouped by crate name and ordered newest version first. Each
+entry records the dependant's name, version, development flag, path, and
+whether that version is its crate's selected one. The requires field names the
+crate the dependant asks for and provided_version is the version this release
+carries under that name, so a toolchain declaring provides = ["gnat=16.2.0"] is
+resolved as gnat 16.2.0. The requirement field is the declared version set and
+qualifies reports whether provided_version satisfies it, following Alire's
+semantic_versioning rules. qualifies is null when the requirement cannot be
+parsed. Dependants outside this index are not listed.
 
 Browser clients on other origins can fetch these files because GitHub Pages
 serves static assets with Access-Control-Allow-Origin: *.
@@ -1205,7 +1656,7 @@ def render_llms(catalog: dict[str, Any]) -> str:
 
 > A human- and machine-readable catalog of Ada packages and GNAT compiler builds maintained by Flyology and published through a custom Alire index.
 
-This index is separate from the Alire community index. The JSON resources are generated directly from the indexed TOML manifests and preserve every manifest field. A package's `selected_version` is its newest published release, or its newest development release when no published release exists.
+This index is separate from the Alire community index. The JSON resources are generated directly from the indexed TOML manifests and preserve every manifest field. A package's `selected_version` is its newest published release, or its newest development release when no published release exists. Every version also carries a `dependants` array naming the indexed releases that require it, the version set each one declares, and whether that requirement is satisfied by the version in question.
 
 ## Catalog
 
