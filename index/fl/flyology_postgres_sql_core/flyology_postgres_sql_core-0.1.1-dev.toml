@@ -14,6 +14,6 @@ project-files = ["sql_core.gpr"]
 flyology_postgres = "~0.1.1-dev"
 
 [origin]
-commit = "92212697b11142f0b27220b0bc55640fe5c132d1"
+commit = "a8af8e1f64da40795a964d2cf17ef1057320b26b"
 subdir = "sql/core"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"
