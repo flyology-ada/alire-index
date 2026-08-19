@@ -136,24 +136,3 @@ Run the updater's isolated local-remote test with:
 ```sh
 ./scripts/test-update-dev-origins.sh
 ```
-
-## Packages
-
-- `flyology` `0.1.0-dev`
-- `flyology_allocators` `0.1.0-dev`
-- `flyology_bench` `0.1.0-dev`
-- `flyology_cachelines` `0.1.0-dev`
-- `flyology_debug` `0.1.0-dev`
-- `flyology_http` `0.1.0-dev`
-- `flyology_iri` `0.1.0-dev`
-- `flyology_numa` `0.1.0-dev`
-- `flyology_simd` `0.1.0-dev`
-- `flyology_postgres` `0.1.0-dev`
-- `flyology_postgres_sql_core` `0.1.0-dev`
-- `flyology_postgres_sql_v14` `0.1.0-dev`
-- `flyology_postgres_sql_v15` `0.1.0-dev`
-- `flyology_postgres_sql_v16` `0.1.0-dev`
-- `flyology_postgres_sql_v17` `0.1.0-dev`
-- `flyology_postgres_sql_v18` `0.1.0-dev`
-- `flyology_postgres_sql` `0.1.0-dev`
-- `flyology_tui` `0.1.0-dev`
