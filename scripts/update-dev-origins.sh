@@ -10,10 +10,11 @@ Fast-forward this index checkout, publish releases tagged <crate>/v<version>,
 then pin every active -dev manifest to the HEAD advertised by its configured
 Git origin. Each -dev manifest is re-rendered from the alire.toml at that
 commit plus a generated [origin] table, so its dependencies track the source.
-Manifests that share an origin are advanced to the same exact commit. A -dev
-manifest whose source declares a different version is reported and skipped. A
-stable release retires development versions of the same crate at that semantic
-version or lower on subsequent runs.
+Local [[pins]] are dropped when publishing, so each pinned dependency must
+state the constraint that replaces its pin. Manifests that share an origin are
+advanced to the same exact commit. A -dev manifest whose source declares a
+different version is reported and skipped. A stable release retires development
+versions of the same crate at that semantic version or lower on subsequent runs.
 
   --crate NAME
             update only the origin group containing NAME; may be repeated
@@ -456,7 +457,67 @@ render_development_manifest () {
     fail "$render_source_manifest at $render_commit already contains an [origin] table"
   fi
 
-  cp "$render_candidate" "$render_destination"
+  # A development manifest serves two audiences. Locally a [[pins]] entry makes
+  # a sibling checkout fulfil a dependency; as an indexed dependency the same
+  # crate must come from the index, and a path pin is meaningless there. Publish
+  # the manifest without its pins, exactly as the pin target is dropped from a
+  # published crate elsewhere, and require the dependency itself to carry the
+  # constraint that then takes over.
+  render_pins="$temporary_root/development-pins"
+  awk '
+    /^[[:space:]]*\[\[pins\]\][[:space:]]*$/ { in_pins = 1; next }
+    /^[[:space:]]*\[/ { in_pins = 0 }
+    in_pins && /=/ {
+      name = $0
+      sub(/[[:space:]]*=.*$/, "", name)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name != "") {
+        print name
+      }
+    }
+  ' "$render_candidate" >"$render_pins"
+
+  while IFS= read -r pinned_crate; do
+    [ -n "$pinned_crate" ] || continue
+    pinned_constraint=$(awk -v crate="$pinned_crate" '
+      /^[[:space:]]*\[\[depends-on\]\][[:space:]]*$/ { in_depends = 1; next }
+      /^[[:space:]]*\[/ { in_depends = 0 }
+      in_depends && /=/ {
+        name = $0
+        sub(/[[:space:]]*=.*$/, "", name)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+        if (name == crate) {
+          value = $0
+          sub(/^[^=]*=[[:space:]]*/, "", value)
+          gsub(/^"|"[[:space:]]*$/, "", value)
+          print value
+          exit
+        }
+      }
+    ' "$render_candidate")
+    [ -n "$pinned_constraint" ] || \
+      fail "$render_source_manifest at $render_commit pins $pinned_crate without depending on it"
+    [ "$pinned_constraint" != "*" ] || \
+      fail "$render_source_manifest at $render_commit pins $pinned_crate but leaves its dependency unconstrained; state the version the pin stands in for"
+  done <"$render_pins"
+
+  awk '
+    /^[[:space:]]*\[\[pins\]\][[:space:]]*$/ { in_pins = 1; next }
+    /^[[:space:]]*\[/ { in_pins = 0 }
+    in_pins { next }
+    { print }
+  ' "$render_candidate" | awk '
+    NF == 0 { blank = 1; next }
+    {
+      if (blank && emitted) {
+        print ""
+      }
+      blank = 0
+      emitted = 1
+      print
+    }
+  ' >"$render_destination"
+
   printf '\n[origin]\ncommit = "%s"\n' "$render_commit" >>"$render_destination"
   if [ -n "$render_subdir" ]; then
     printf 'subdir = "%s"\n' "$render_subdir" >>"$render_destination"

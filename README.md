@@ -114,7 +114,16 @@ metadata never drift away from the source the manifest claims to describe. A
 development manifest whose source has moved to a different version is reported
 and left untouched, because a manifest may not name one version while its
 source declares another. The complete result is validated with `alr index
---check`. It ignores local source checkouts, including unpushed commits. By
+--check`.
+
+A development manifest serves two audiences. Locally a `[[pins]]` entry makes a
+sibling checkout fulfil a dependency, which is how a monorepo builds its own
+crates against the working tree. As an indexed dependency the same crate must
+come from the index, where a local path means nothing. The updater therefore
+publishes each manifest without its `[[pins]]` table, and the dependency itself
+has to carry the constraint that takes over once the pin is gone. Pinning a
+crate while leaving its dependency at `"*"` is refused rather than published,
+so a pin can never silently widen what dependents resolve. It ignores local source checkouts, including unpushed commits. By
 default it leaves changes for review; use `--commit` to create a
 Problem/Solution commit, or `--push` to commit and push the update.
 

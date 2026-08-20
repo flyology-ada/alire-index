@@ -26,6 +26,8 @@ make_development_source_manifest () {
   crate_name=$2
   version=$3
   dependency=${4:-}
+  dependency_constraint=${5:-}
+  pin_path=${6:-}
   mkdir -p "$(dirname -- "$manifest")"
   {
     printf 'name = "%s"\n' "$crate_name"
@@ -33,7 +35,11 @@ make_development_source_manifest () {
     printf 'version = "%s"\n' "$version"
     printf 'licenses = "MIT"\n'
     if [ -n "$dependency" ]; then
-      printf '\n[[depends-on]]\n%s = "*"\n' "$dependency"
+      printf '\n[[depends-on]]\n%s = "%s"\n' \
+        "$dependency" "${dependency_constraint:-*}"
+    fi
+    if [ -n "$pin_path" ]; then
+      printf '\n[[pins]]\n%s = { path = "%s" }\n' "$dependency" "$pin_path"
     fi
   } >"$manifest"
 }
@@ -42,6 +48,8 @@ make_source () {
   source_name=$1
   source_version=$2
   source_dependency=${3:-}
+  source_constraint=${4:-}
+  source_pin_path=${5:-}
   source_work="$temporary_root/$source_name-work"
   source_remote="$temporary_root/$source_name.git"
   git init -q --bare "$source_remote"
@@ -50,7 +58,7 @@ make_source () {
   printf '%s\n' "$source_name remote release" >"$source_work/release.txt"
   make_development_source_manifest \
     "$source_work/alire.toml" "$source_name" "$source_version" \
-    "$source_dependency"
+    "$source_dependency" "$source_constraint" "$source_pin_path"
   git -C "$source_work" add release.txt alire.toml
   git -C "$source_work" commit -q -m "Publish $source_name"
   git -C "$source_work" remote add origin "$source_remote"
@@ -90,7 +98,7 @@ make_source_manifest () {
 }
 
 make_source alpha 0.2.0-dev
-make_source beta 0.1.0-dev beta_helper
+make_source beta 0.1.0-dev beta_helper '~0.2.0-dev' beta_helper
 make_source gamma 0.1.0-dev
 alpha_remote="$temporary_root/alpha.git"
 beta_remote="$temporary_root/beta.git"
@@ -313,9 +321,15 @@ grep -F "commit = \"$beta_head\"" \
 grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/re/released/released-0.9.0-dev.toml" >/dev/null || \
   fail "shared-origin selection advanced a retired development manifest"
-grep -F 'beta_helper = "*"' \
+grep -F 'beta_helper = "~0.2.0-dev"' \
   "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
   fail "development manifest did not adopt its source dependencies"
+grep -F '[[pins]]' \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null && \
+  fail "published manifest kept a local development pin"
+grep -F 'path = ' \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null && \
+  fail "published manifest kept a local pin path"
 grep -F 'description = "Development source manifest for beta"' \
   "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
   fail "development manifest did not adopt its source metadata"
@@ -329,6 +343,24 @@ grep -F 'index --check' "$alr_log" >/dev/null || \
 git -C "$index_work" log -1 --format=%s | \
   grep -F 'Problem: Development index trails remote sources' >/dev/null || \
   fail "generated commit does not use the repository message format"
+
+unconstrained_work="$temporary_root/index-unconstrained-work"
+make_development_source_manifest \
+  "$temporary_root/gamma-work/alire.toml" gamma 0.1.0-dev \
+  gamma_helper '' gamma_helper
+git -C "$temporary_root/gamma-work" add alire.toml
+git -C "$temporary_root/gamma-work" commit -q -m 'Pin gamma without a constraint'
+git -C "$temporary_root/gamma-work" push -q origin main
+git clone -q "$index_remote" "$unconstrained_work"
+if ALR=$fake_alr ALR_LOG=$alr_log \
+  "$unconstrained_work/scripts/update-dev-origins.sh" --crate gamma \
+  >"$temporary_root/unconstrained.stdout" \
+  2>"$temporary_root/unconstrained.stderr"; then
+  fail "a pin standing in for an unstated version was published"
+fi
+grep -F 'leaves its dependency unconstrained' \
+  "$temporary_root/unconstrained.stderr" >/dev/null || \
+  fail "unconstrained pinned dependency was not explained"
 
 printf '%s\n' 'dirty' >>"$index_work/REMOTE.md"
 if ALR=$fake_alr ALR_LOG=$alr_log \
