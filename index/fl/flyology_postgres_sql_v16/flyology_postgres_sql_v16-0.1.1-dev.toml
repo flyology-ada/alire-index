@@ -8,12 +8,13 @@ maintainers-logins = ["yrashk"]
 licenses = "MIT OR Apache-2.0"
 website = "https://github.com/flyology-ada/flyology-postgres"
 tags = ["ada", "postgres", "sql", "parser", "ast"]
+
 project-files = ["sql_v16.gpr"]
 
 [[depends-on]]
 flyology_postgres_sql_core = "~0.1.1-dev"
 
 [origin]
-commit = "a8af8e1f64da40795a964d2cf17ef1057320b26b"
+commit = "f9101bc486e76f458d424a2ce93f916a6fc29839"
 subdir = "sql/v16"
 url = "git+https://github.com/flyology-ada/flyology-postgres.git"
