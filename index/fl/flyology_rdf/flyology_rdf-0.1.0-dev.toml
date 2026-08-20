@@ -1,14 +1,13 @@
 name = "flyology_rdf"
 description = "RDF 1.2 terms, streaming Turtle/TriG parsing, canonicalization"
 version = "0.1.0-dev"
-
+licenses = "MIT OR Apache-2.0"
 authors = ["Yurii Rashkovskii"]
 maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
 maintainers-logins = ["yrashk"]
-licenses = "MIT OR Apache-2.0"
 website = "https://rdf.flyology.org/"
-tags = ["ada", "rdf", "turtle", "trig", "parser"]
 project-files = ["flyology_rdf.gpr"]
+tags = ["ada", "rdf", "turtle", "trig", "parser"]
 
 [[depends-on]]
 flyology_iri = ">=0.1.1-dev & <0.2.0"
@@ -25,5 +24,5 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "a8dd2f3933ec70037cebd94102f4e4d2817f4244"
+commit = "7e5c90c4a3fd9395ce43e25a01595630ac67da5d"
 url = "git+https://github.com/flyology-ada/flyology-rdf.git"
