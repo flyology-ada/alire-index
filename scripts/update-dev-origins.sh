@@ -8,9 +8,12 @@ Usage: ./scripts/update-dev-origins.sh [--crate NAME]... [--releases-only]
 
 Fast-forward this index checkout, publish releases tagged <crate>/v<version>,
 then pin every active -dev manifest to the HEAD advertised by its configured
-Git origin. Manifests that share an origin are advanced to the same exact
-commit. A stable release retires development versions of the same crate at
-that semantic version or lower on subsequent runs.
+Git origin. Each -dev manifest is re-rendered from the alire.toml at that
+commit plus a generated [origin] table, so its dependencies track the source.
+Manifests that share an origin are advanced to the same exact commit. A -dev
+manifest whose source declares a different version is reported and skipped. A
+stable release retires development versions of the same crate at that semantic
+version or lower on subsequent runs.
 
   --crate NAME
             update only the origin group containing NAME; may be repeated
@@ -157,6 +160,9 @@ release_plan="$temporary_root/release-plan"
 : >"$selected_origins"
 : >"$update_plan"
 : >"$release_plan"
+rendered_root="$temporary_root/rendered"
+mkdir "$rendered_root"
+rendered_count=0
 
 (
   cd "$index_root"
@@ -377,6 +383,87 @@ else
   mv "$temporary_root/sorted-origins" "$selected_origins"
 fi
 
+source_repository_count=0
+
+ensure_source_repository () {
+  ensure_origin_url=$1
+  source_repository=$(awk -F '\t' -v url="$ensure_origin_url" \
+    '$1 == url { print $2; exit }' "$source_repositories")
+  if [ -z "$source_repository" ]; then
+    source_repository_count=$((source_repository_count + 1))
+    source_repository="$temporary_root/source-$source_repository_count.git"
+    git init -q --bare "$source_repository"
+    printf '%s\t%s\n' \
+      "$ensure_origin_url" "$source_repository" >>"$source_repositories"
+  fi
+}
+
+# An index manifest is its source manifest plus an [origin] table, so render
+# development entries from the source at the pinned commit instead of editing
+# the commit in place. Rewriting only the commit lets the recorded dependencies
+# drift away from the sources they claim to describe.
+render_development_manifest () {
+  render_relative_manifest=$1
+  render_crate_name=$2
+  render_version=$3
+  render_origin_url=$4
+  render_commit=$5
+  render_destination=$6
+
+  render_subdir=$(origin_optional_field subdir \
+    "$index_root/$render_relative_manifest") || \
+    fail "$render_relative_manifest has an invalid [origin] subdir"
+  case $render_subdir in
+    *"$(printf '\t')"*)
+      fail "$render_relative_manifest contains a tab in its origin subdir"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      fail "$render_relative_manifest has an unsafe [origin] subdir: $render_subdir"
+      ;;
+  esac
+
+  ensure_source_repository "$render_origin_url"
+  git --git-dir="$source_repository" fetch -q --depth=1 \
+    "${render_origin_url#git+}" HEAD || \
+    fail "could not fetch the default branch of $render_origin_url"
+  render_fetched_commit=$(git --git-dir="$source_repository" \
+    rev-parse 'FETCH_HEAD^{commit}') || \
+    fail "the default branch of $render_origin_url does not resolve to a commit"
+  [ "$render_fetched_commit" = "$render_commit" ] || \
+    fail "$render_origin_url moved while the index was being updated"
+
+  render_source_manifest=${render_subdir:+$render_subdir/}alire.toml
+  render_candidate="$temporary_root/development-candidate"
+  git --git-dir="$source_repository" show \
+    "FETCH_HEAD:$render_source_manifest" >"$render_candidate" || \
+    fail "$render_origin_url does not contain $render_source_manifest"
+
+  render_source_name=$(top_level_field name "$render_candidate") || \
+    fail "$render_source_manifest at $render_commit must contain exactly one quoted crate name"
+  render_source_version=$(top_level_field version "$render_candidate") || \
+    fail "$render_source_manifest at $render_commit must contain exactly one quoted version"
+  [ "$render_source_name" = "$render_crate_name" ] || \
+    fail "$render_source_manifest at $render_commit declares crate $render_source_name"
+  if [ "$render_source_version" != "$render_version" ]; then
+    printf '%s\n' \
+      "Ignoring $render_relative_manifest: its source now declares $render_source_version."
+    return 1
+  fi
+  if awk '
+    /^[[:space:]]*\[origin\][[:space:]]*$/ { found = 1 }
+    END { exit !found }
+  ' "$render_candidate"; then
+    fail "$render_source_manifest at $render_commit already contains an [origin] table"
+  fi
+
+  cp "$render_candidate" "$render_destination"
+  printf '\n[origin]\ncommit = "%s"\n' "$render_commit" >>"$render_destination"
+  if [ -n "$render_subdir" ]; then
+    printf 'subdir = "%s"\n' "$render_subdir" >>"$render_destination"
+  fi
+  printf 'url = "%s"\n' "$render_origin_url" >>"$render_destination"
+}
+
 while IFS="$tab" read -r \
   relative_manifest crate_name origin_url old_commit; do
   if ! awk -v origin="$origin_url" \
@@ -480,36 +567,38 @@ while IFS="$tab" read -r \
     awk -F '\t' -v manifest="$relative_manifest" '
       $1 == manifest { found = 1 }
       END { exit !found }
-    ' "$manifest_inventory" && [ "$old_commit" != "$new_commit" ]; then
-    printf '%s\t%s\t%s\n' \
-      "$relative_manifest" "$old_commit" "$new_commit" >>"$update_plan"
+    ' "$manifest_inventory"; then
+    development_version=$(top_level_field version \
+      "$index_root/$relative_manifest") || \
+      fail "$relative_manifest must contain exactly one quoted version"
+    rendered_count=$((rendered_count + 1))
+    rendered_manifest="$rendered_root/$rendered_count.toml"
+    if render_development_manifest "$relative_manifest" "$crate_name" \
+      "$development_version" "$origin_url" "$new_commit" \
+      "$rendered_manifest" && \
+      ! cmp -s "$rendered_manifest" "$index_root/$relative_manifest"; then
+      printf '%s\t%s\t%s\t%s\n' \
+        "$relative_manifest" "$old_commit" "$new_commit" \
+        "$rendered_manifest" >>"$update_plan"
+    fi
   fi
 done <"$release_sources"
 
 if [ ! -s "$update_plan" ] && [ ! -s "$release_plan" ]; then
   if [ "$update_development" -eq 1 ]; then
     printf '%s\n' \
-      "No matching releases; selected development manifests already match their remote HEADs."
+      "No matching releases; selected development manifests already match their sources."
   else
     printf '%s\n' "No matching releases were found."
   fi
   exit 0
 fi
 
-source_repository_count=0
 while IFS="$tab" read -r \
   development_manifest release_manifest crate_name version origin_url \
   tag_commit tag_name subdir; do
   remote_url=${origin_url#git+}
-  source_repository=$(awk -F '\t' -v url="$origin_url" \
-    '$1 == url { print $2; exit }' "$source_repositories")
-  if [ -z "$source_repository" ]; then
-    source_repository_count=$((source_repository_count + 1))
-    source_repository="$temporary_root/source-$source_repository_count.git"
-    git init -q --bare "$source_repository"
-    printf '%s\t%s\n' \
-      "$origin_url" "$source_repository" >>"$source_repositories"
-  fi
+  ensure_source_repository "$origin_url"
 
   printf '%s\n' "Publishing $tag_name from $origin_url..."
   git --git-dir="$source_repository" fetch -q --depth=1 \
@@ -551,29 +640,14 @@ while IFS="$tab" read -r \
   printf '%s\n' "$release_manifest: published from $tag_name"
 done <"$release_plan"
 
-while IFS="$tab" read -r relative_manifest old_commit new_commit; do
-  manifest="$index_root/$relative_manifest"
-  rendered="$temporary_root/rendered"
-  awk -v new_commit="$new_commit" '
-    /^\[[^]]+\][[:space:]]*$/ {
-      in_origin = ($0 == "[origin]")
-    }
-    in_origin && /^[[:space:]]*commit[[:space:]]*=/ {
-      print "commit = \"" new_commit "\""
-      replaced++
-      next
-    }
-    { print }
-    END {
-      if (replaced != 1) {
-        exit 1
-      }
-    }
-  ' "$manifest" >"$rendered" || \
-    fail "could not update the [origin] commit in $relative_manifest"
-  mv "$rendered" "$manifest"
-  printf '%s\n' \
-    "$relative_manifest: $old_commit -> $new_commit"
+while IFS="$tab" read -r \
+  relative_manifest old_commit new_commit rendered_manifest; do
+  cp "$rendered_manifest" "$index_root/$relative_manifest"
+  if [ "$old_commit" = "$new_commit" ]; then
+    printf '%s\n' "$relative_manifest: refreshed at $new_commit"
+  else
+    printf '%s\n' "$relative_manifest: $old_commit -> $new_commit"
+  fi
 done <"$update_plan"
 
 git -C "$index_root" diff --check

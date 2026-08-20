@@ -108,7 +108,12 @@ tags are ignored. Retired development manifests remain repository descriptors,
 so later patch and minor release tags continue to be discovered automatically.
 
 The script also updates all `*-dev.toml` manifests that share an origin to the
-same default-branch commit and validates the complete result with `alr index
+same default-branch commit. Each one is re-rendered from the `alire.toml` at
+that commit plus a generated `[origin]` table, so dependencies and other
+metadata never drift away from the source the manifest claims to describe. A
+development manifest whose source has moved to a different version is reported
+and left untouched, because a manifest may not name one version while its
+source declares another. The complete result is validated with `alr index
 --check`. It ignores local source checkouts, including unpushed commits. By
 default it leaves changes for review; use `--commit` to create a
 Problem/Solution commit, or `--push` to commit and push the update.

@@ -21,15 +21,37 @@ export GIT_AUTHOR_EMAIL='alire-index-test@example.invalid'
 export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
 export GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 
+make_development_source_manifest () {
+  manifest=$1
+  crate_name=$2
+  version=$3
+  dependency=${4:-}
+  mkdir -p "$(dirname -- "$manifest")"
+  {
+    printf 'name = "%s"\n' "$crate_name"
+    printf 'description = "Development source manifest for %s"\n' "$crate_name"
+    printf 'version = "%s"\n' "$version"
+    printf 'licenses = "MIT"\n'
+    if [ -n "$dependency" ]; then
+      printf '\n[[depends-on]]\n%s = "*"\n' "$dependency"
+    fi
+  } >"$manifest"
+}
+
 make_source () {
   source_name=$1
+  source_version=$2
+  source_dependency=${3:-}
   source_work="$temporary_root/$source_name-work"
   source_remote="$temporary_root/$source_name.git"
   git init -q --bare "$source_remote"
   git -C "$source_remote" symbolic-ref HEAD refs/heads/main
   git init -q --initial-branch=main "$source_work"
   printf '%s\n' "$source_name remote release" >"$source_work/release.txt"
-  git -C "$source_work" add release.txt
+  make_development_source_manifest \
+    "$source_work/alire.toml" "$source_name" "$source_version" \
+    "$source_dependency"
+  git -C "$source_work" add release.txt alire.toml
   git -C "$source_work" commit -q -m "Publish $source_name"
   git -C "$source_work" remote add origin "$source_remote"
   git -C "$source_work" push -q -u origin main
@@ -67,9 +89,9 @@ make_source_manifest () {
   } >"$manifest"
 }
 
-make_source alpha
-make_source beta
-make_source gamma
+make_source alpha 0.2.0-dev
+make_source beta 0.1.0-dev beta_helper
+make_source gamma 0.1.0-dev
 alpha_remote="$temporary_root/alpha.git"
 beta_remote="$temporary_root/beta.git"
 gamma_remote="$temporary_root/gamma.git"
@@ -207,16 +229,24 @@ grep -F 'No matching releases were found.' \
   fail "retired development selector did not scan for releases"
 
 ALR=$fake_alr ALR_LOG=$alr_log \
-  "$index_work/scripts/update-dev-origins.sh" --crate alpha_extra --push
+  "$index_work/scripts/update-dev-origins.sh" --crate alpha_extra --push \
+  >"$temporary_root/alpha-extra.stdout"
 
 [ -f "$index_work/REMOTE.md" ] || \
   fail "stale index checkout was not fast-forwarded"
+# Alpha's sources have moved on to their release versions, so the development
+# manifests no longer describe them and must be left alone rather than pinned
+# to a commit that declares a different version.
 for manifest in \
   index/al/alpha/alpha-0.2.0-dev.toml \
   index/al/alpha_extra/alpha_extra-0.1.0-dev.toml; do
-  grep -F "commit = \"$alpha_head\"" "$index_work/$manifest" >/dev/null || \
-    fail "$manifest did not use alpha's remote HEAD"
+  grep -F 'commit = "0000000000000000000000000000000000000000"' \
+    "$index_work/$manifest" >/dev/null || \
+    fail "$manifest tracked a source declaring a different version"
 done
+grep -F 'Ignoring index/al/alpha_extra/alpha_extra-0.1.0-dev.toml' \
+  "$temporary_root/alpha-extra.stdout" >/dev/null || \
+  fail "skipping a diverged development source was not explained"
 for manifest in \
   index/al/alpha/alpha-0.0.9-dev.toml \
   index/al/alpha/alpha-0.1.0-dev.toml; do
@@ -283,6 +313,15 @@ grep -F "commit = \"$beta_head\"" \
 grep -F 'commit = "0000000000000000000000000000000000000000"' \
   "$index_work/index/re/released/released-0.9.0-dev.toml" >/dev/null || \
   fail "shared-origin selection advanced a retired development manifest"
+grep -F 'beta_helper = "*"' \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
+  fail "development manifest did not adopt its source dependencies"
+grep -F 'description = "Development source manifest for beta"' \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
+  fail "development manifest did not adopt its source metadata"
+grep -F "url = \"git+$beta_remote\"" \
+  "$index_work/index/be/beta/beta-0.1.0-dev.toml" >/dev/null || \
+  fail "rendered development manifest lost its origin URL"
 grep -F 'index --check' "$alr_log" >/dev/null || \
   fail "Alire index validation was not run"
 [ -z "$(git -C "$index_work" status --porcelain)" ] || \
