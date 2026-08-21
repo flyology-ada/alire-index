@@ -57,8 +57,10 @@ Human-readable routes include:
 - `https://crates.flyology.org/crates/<package-name>/`
 - `https://crates.flyology.org/crates/<package-name>/<version>/`
 - `https://crates.flyology.org/changes/`
+- `https://crates.flyology.org/stats/`
 - `https://crates.flyology.org/community/`
 - `https://crates.flyology.org/community/changes/`
+- `https://crates.flyology.org/community/stats/`
 
 The package page selects the newest published version. If a crate has only
 `-dev` manifests, it selects the newest development version and identifies the
@@ -79,6 +81,12 @@ history at `/community/changes/`. Community pages intentionally omit README
 and changelog source cloning: mirroring hundreds of upstream source
 repositories during every site build would make the shadow unreliable, while
 the structured manifests, relationships, provenance, and JSON remain complete.
+Each catalog also has a statistics page derived at build time. It reports
+license declarations and package composition from selected releases, release
+status, dependency resolution, and Git-derived age, monthly activity,
+freshness, and frequently changed packages. Activity includes only paths for
+manifests currently present in the catalog, so deleted packages are outside
+the snapshot.
 GitHub Pages serves JSON with `Access-Control-Allow-Origin: *`, so browser
 applications on other origins can fetch these URLs directly. GitHub Pages does
 not support repository-defined custom response headers, so clients should

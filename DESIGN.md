@@ -69,6 +69,11 @@ the complete release without duplicating every manifest on the front page.
 - Each landing page places a compact, bounded crate-change digest before the
   package catalog. The detailed changes route expands that Git-derived history
   into added versions, development advances, and manifest updates.
+- Each catalog exposes a peer statistics route in the primary navigation.
+  Statistics are computed at build time from selected manifests, resolved
+  dependencies, and Git history. Comparative distributions use labeled bars,
+  monthly activity uses a compact column chart, and exact values remain visible
+  without relying on hover, scripting, or color.
 - Dependant lists group by crate on a tonal surface, newest version first.
   The dependant's own selected version is bold, and each row ends with a
   verdict in a right-aligned rail so qualification scans vertically. The

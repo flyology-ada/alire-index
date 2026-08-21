@@ -77,6 +77,7 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertTrue(document.startswith("# Flyology Crate Index\n\n> "))
         self.assertIn(f"[Aggregate JSON catalog]({generate_site.CANONICAL_URL}crates.json)", document)
         self.assertIn(f"[Change history]({generate_site.CANONICAL_URL}changes/)", document)
+        self.assertIn(f"[Index statistics]({generate_site.CANONICAL_URL}stats/)", document)
         self.assertIn(f"[JSON schema notes]({generate_site.CANONICAL_URL}README.txt)", document)
         for package in self.catalog["packages"]:
             endpoint = (
@@ -85,7 +86,7 @@ class GenerateSiteTests(unittest.TestCase):
             )
             self.assertIn(endpoint, document)
             self.assertIn(package["description"], document)
-        self.assertEqual(document.count("\n- ["), len(self.catalog["packages"]) + 5)
+        self.assertEqual(document.count("\n- ["), len(self.catalog["packages"]) + 6)
 
     def test_pages_use_the_flyology_logo(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
@@ -133,6 +134,30 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn("Index changes.", page)
         self.assertIn(f"{generate_site.REPOSITORY_URL}/commit/", page)
         self.assertIn(history[0]["commit"][:8], page)
+
+    def test_stats_page_reports_composition_and_git_activity(self) -> None:
+        home = (self.output / "index.html").read_text(encoding="utf-8")
+        page = (self.output / "stats" / "index.html").read_text(encoding="utf-8")
+        stats = generate_site.load_catalog_statistics(
+            self.catalog, ROOT, ROOT / "index"
+        )
+
+        self.assertIn('<a href="./stats/">Stats</a>', home)
+        self.assertIn('<a href="../stats/" aria-current="page">Stats</a>', page)
+        self.assertIn("Twelve months of manifest activity.", page)
+        self.assertIn("License declarations.", page)
+        self.assertIn("Freshness and active packages.", page)
+        self.assertIn("Dependency reach.", page)
+        self.assertIn('href="../community/stats/"', page)
+        self.assertEqual(len(stats["monthly_activity"]), 12)
+        self.assertEqual(stats["packages"], len(self.catalog["packages"]))
+        self.assertEqual(
+            stats["releases"],
+            sum(len(package["versions"]) for package in self.catalog["packages"]),
+        )
+        self.assertTrue(stats["first_activity"])
+        self.assertTrue(stats["latest_activity"])
+        self.assertGreater(sum(item["count"] for item in stats["licenses"]), 0)
 
     def test_change_entry_distinguishes_publication_and_dev_update(self) -> None:
         before = {
@@ -402,6 +427,9 @@ Community **testing details**.
             community_changes = (
                 output / "community" / "changes" / "index.html"
             ).read_text(encoding="utf-8")
+            community_stats = (
+                output / "community" / "stats" / "index.html"
+            ).read_text(encoding="utf-8")
             aunit_page = (
                 output / "community" / "crates" / "aunit" / "1.0.0" / "index.html"
             ).read_text(encoding="utf-8")
@@ -409,6 +437,9 @@ Community **testing details**.
             self.assertIn("aunit", community_home)
             self.assertIn("New crate", community_changes)
             self.assertIn("aunit <code>1.0.0</code>", community_changes)
+            self.assertIn("Alire community index", community_stats)
+            self.assertIn('href="../../stats/"', community_stats)
+            self.assertIn("Not declared", community_stats)
             self.assertIn('href="../../../../crates/consumer/1.0.0/"', aunit_page)
             self.assertIn("Flyology", aunit_page)
             self.assertIn("Community <strong>testing details</strong>.", aunit_page)

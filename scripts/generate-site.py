@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, time
 from itertools import groupby
 from pathlib import Path, PurePosixPath
@@ -1255,6 +1255,191 @@ def load_change_history(
     return history
 
 
+def parse_instant(value: str) -> datetime:
+    """Parse an ISO timestamp from Git or the generated catalog."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def month_keys(instant: datetime, count: int = 12) -> list[str]:
+    """Return COUNT calendar months ending with INSTANT's month."""
+    current = instant.year * 12 + instant.month - 1
+    keys = []
+    for offset in range(count - 1, -1, -1):
+        absolute = current - offset
+        year, month_index = divmod(absolute, 12)
+        keys.append(f"{year:04d}-{month_index + 1:02d}")
+    return keys
+
+
+def duration_label(days: int | None) -> str:
+    """Render an approximate age without implying day-level precision."""
+    if days is None:
+        return "Unavailable"
+    if days < 31:
+        return f"{days} day{'s' if days != 1 else ''}"
+    if days < 365:
+        months = max(1, round(days / 30.44))
+        return f"{months} month{'s' if months != 1 else ''}"
+    years = days // 365
+    months = round((days % 365) / 30.44)
+    if months == 12:
+        years += 1
+        months = 0
+    return (
+        f"{years} year{'s' if years != 1 else ''}, {months} months"
+        if months
+        else f"{years} year{'s' if years != 1 else ''}"
+    )
+
+
+def load_catalog_statistics(
+    catalog: dict[str, Any], repository: Path, source: Path
+) -> dict[str, Any]:
+    """Derive current-catalog composition and activity from manifests and Git."""
+    packages = catalog["packages"]
+    generated = parse_instant(catalog["generated_at"])
+    path_to_package = {
+        release["path"]: package["name"]
+        for package in packages
+        for release in package["versions"]
+    }
+    package_activity: dict[str, list[datetime]] = defaultdict(list)
+    manifest_activity: list[datetime] = []
+    log = git_output(
+        repository,
+        "log",
+        "--format=%x1e%H%x09%cI",
+        "--name-only",
+        "--diff-filter=AM",
+        "--",
+        source.relative_to(repository).as_posix(),
+    )
+    if log:
+        for block in log.split("\x1e"):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            try:
+                _commit, timestamp = lines[0].split("\t", 1)
+                instant = parse_instant(timestamp)
+            except (ValueError, TypeError):
+                continue
+            changed_packages = set()
+            for path in set(lines[1:]):
+                package_name = path_to_package.get(path)
+                if package_name is None:
+                    continue
+                manifest_activity.append(instant)
+                changed_packages.add(package_name)
+            for package_name in changed_packages:
+                package_activity[package_name].append(instant)
+
+    package_dates = {
+        name: {"first": min(instants), "latest": max(instants), "changes": len(instants)}
+        for name, instants in package_activity.items()
+    }
+    all_instants = [instant for instants in package_activity.values() for instant in instants]
+    first_activity = min(all_instants) if all_instants else None
+    latest_activity = max(all_instants) if all_instants else None
+
+    months = month_keys(generated)
+    monthly_counts = Counter(
+        instant.strftime("%Y-%m") for instant in manifest_activity
+    )
+    monthly_activity = [
+        {
+            "month": month,
+            "label": datetime.strptime(month, "%Y-%m").strftime("%b %y"),
+            "count": monthly_counts[month],
+        }
+        for month in months
+    ]
+
+    freshness = Counter()
+    for package in packages:
+        latest = package_dates.get(package["name"], {}).get("latest")
+        if latest is None:
+            freshness["Unknown"] += 1
+            continue
+        age = max(0, (generated - latest).days)
+        if age < 30:
+            freshness["Past 30 days"] += 1
+        elif age < 90:
+            freshness["30 to 89 days"] += 1
+        elif age < 365:
+            freshness["90 to 364 days"] += 1
+        else:
+            freshness["1 year or more"] += 1
+
+    licenses = Counter()
+    package_kinds = Counter()
+    dependencies = []
+    for package in packages:
+        selected = release_for(package, package["selected_version"])
+        manifest = selected["manifest"]
+        licenses[str(manifest.get("licenses") or "Not declared")] += 1
+        package_kinds[package_kind(manifest)] += 1
+        dependencies.extend(selected.get("dependencies", []))
+
+    release_counts = Counter(
+        "external"
+        if release.get("external")
+        else "development"
+        if release["development"]
+        else "published"
+        for package in packages
+        for release in package["versions"]
+    )
+    active_packages = sorted(
+        (
+            {
+                "name": package["name"],
+                "changes": package_dates[package["name"]]["changes"],
+                "latest": package_dates[package["name"]]["latest"].isoformat().replace("+00:00", "Z"),
+            }
+            for package in packages
+            if package["name"] in package_dates
+        ),
+        key=lambda item: (item["changes"], item["latest"], item["name"]),
+        reverse=True,
+    )[:8]
+    cross_catalog_dependencies = sum(
+        dependency.get("resolved")
+        and dependency.get("catalog") != catalog["catalog"]["name"]
+        for dependency in dependencies
+    )
+    return {
+        "packages": len(packages),
+        "releases": sum(len(package["versions"]) for package in packages),
+        "release_counts": dict(release_counts),
+        "first_activity": first_activity.isoformat().replace("+00:00", "Z") if first_activity else None,
+        "latest_activity": latest_activity.isoformat().replace("+00:00", "Z") if latest_activity else None,
+        "age_days": max(0, (generated - first_activity).days) if first_activity else None,
+        "age_label": duration_label(max(0, (generated - first_activity).days)) if first_activity else "Unavailable",
+        "monthly_activity": monthly_activity,
+        "monthly_average": round(sum(item["count"] for item in monthly_activity) / len(monthly_activity), 1),
+        "freshness": [
+            {"label": label, "count": freshness[label]}
+            for label in ("Past 30 days", "30 to 89 days", "90 to 364 days", "1 year or more", "Unknown")
+            if freshness[label]
+        ],
+        "licenses": [
+            {"label": label, "count": count}
+            for label, count in sorted(licenses.items(), key=lambda item: (-item[1], item[0].lower()))
+        ],
+        "package_kinds": [
+            {"label": label, "count": count}
+            for label, count in sorted(package_kinds.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "dependencies": {
+            "total": len(dependencies),
+            "resolved": sum(dependency.get("resolved", False) for dependency in dependencies),
+            "cross_catalog": cross_catalog_dependencies,
+        },
+        "active_packages": active_packages,
+    }
+
+
 def text(value: Any) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
@@ -1918,6 +2103,14 @@ def other_catalog_href(root_prefix: str, catalog_name: str) -> str:
     )
 
 
+def other_catalog_stats_href(root_prefix: str, catalog_name: str) -> str:
+    return (
+        f"{root_prefix}community/stats/"
+        if catalog_name == "flyology"
+        else f"{root_prefix}../stats/"
+    )
+
+
 def render_site_header(
     root_prefix: str, current: str, catalog: dict[str, Any]
 ) -> str:
@@ -1927,6 +2120,7 @@ def render_site_header(
     other_label = "Flyology index" if catalog_name == "community" else "Community index"
     package_current = ' aria-current="page"' if current == "packages" else ""
     changes_current = ' aria-current="page"' if current == "changes" else ""
+    stats_current = ' aria-current="page"' if current == "stats" else ""
     return f"""
     <header class="site-header">
       <nav class="site-nav" aria-label="Primary navigation">
@@ -1937,6 +2131,7 @@ def render_site_header(
         <ul class="nav-links" data-nav-links>
           <li><a href="{root_prefix}#catalog"{package_current}>Packages</a></li>
           <li><a href="{root_prefix}changes/"{changes_current}>Changes</a></li>
+          <li><a href="{root_prefix}stats/"{stats_current}>Stats</a></li>
           <li><a class="catalog-switch" href="{other_catalog_href(root_prefix, catalog_name)}"><span>{other_label}</span><span aria-hidden="true">↗</span></a></li>
           <li><a href="{root_prefix}crates.json" download>JSON</a></li>
           <li><a href="{repository_url}">GitHub</a></li>
@@ -2070,6 +2265,196 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
       <div class="footer-inner">
         <p>Generated from the <a href="{repository_url}">{repository_label}</a>.</p>
         <div class="footer-links"><a href="{other_catalog_href('./', catalog_name)}">{other_label}</a><a href="crates.json">Aggregate JSON</a><a href="README.txt">JSON schema notes</a></div>
+      </div>
+    </footer>
+  </body>
+</html>
+"""
+
+
+def compact_distribution(
+    entries: list[dict[str, Any]], *, limit: int = 9
+) -> list[dict[str, Any]]:
+    """Keep a chart compact while preserving its complete total."""
+    if len(entries) <= limit:
+        return entries
+    visible = entries[:limit]
+    return [*visible, {"label": "Other declarations", "count": sum(item["count"] for item in entries[limit:])}]
+
+
+def render_distribution_chart(
+    entries: list[dict[str, Any]], total: int, *, compact: bool = False
+) -> str:
+    displayed = compact_distribution(entries) if compact else entries
+    if not displayed or not total:
+        return '<p class="stats-unavailable">No data is available.</p>'
+    rows = []
+    for item in displayed:
+        percentage = item["count"] / total * 100
+        rows.append(
+            f'<li><div class="distribution-label"><span>{html.escape(str(item["label"]))}</span>'
+            f'<span><strong>{item["count"]}</strong> · {percentage:.0f}%</span></div>'
+            f'<span class="distribution-track" aria-hidden="true"><span style="--bar-size: {percentage:.2f}%"></span></span></li>'
+        )
+    return f'<ol class="distribution-chart">{"".join(rows)}</ol>'
+
+
+def render_monthly_activity(stats: dict[str, Any]) -> str:
+    maximum = max((item["count"] for item in stats["monthly_activity"]), default=0)
+    bars = []
+    for item in stats["monthly_activity"]:
+        height = item["count"] / maximum * 100 if maximum else 0
+        bars.append(
+            f'<li><span class="activity-value">{item["count"]}</span>'
+            f'<span class="activity-track" aria-hidden="true"><span style="--bar-size: {height:.2f}%"></span></span>'
+            f'<time datetime="{item["month"]}">{html.escape(item["label"])}</time></li>'
+        )
+    return f'<ol class="activity-chart" aria-label="Manifest changes by month">{"".join(bars)}</ol>'
+
+
+def render_release_mix(stats: dict[str, Any]) -> str:
+    labels = {
+        "published": "Published",
+        "development": "Development",
+        "external": "System external",
+    }
+    segments = []
+    legend = []
+    for kind in ("published", "development", "external"):
+        count = stats["release_counts"].get(kind, 0)
+        if not count:
+            continue
+        percentage = count / stats["releases"] * 100
+        segments.append(
+            f'<span class="release-mix-{kind}" style="--segment-size: {percentage:.2f}%"></span>'
+        )
+        legend.append(
+            f'<li><span class="release-key release-key-{kind}" aria-hidden="true"></span>'
+            f'<span>{labels[kind]}</span><strong>{count}</strong></li>'
+        )
+    return (
+        f'<div class="release-mix" aria-hidden="true">{"".join(segments)}</div>'
+        f'<ul class="release-legend">{"".join(legend)}</ul>'
+    )
+
+
+def render_stats_page(catalog: dict[str, Any], stats: dict[str, Any]) -> str:
+    catalog_name = catalog["catalog"]["name"]
+    is_community = catalog_name == "community"
+    catalog_label = "Alire community index" if is_community else "Flyology Alire index"
+    repository_url = catalog["catalog"]["repository_url"]
+    latest = stats["latest_activity"]
+    latest_label = parse_instant(latest).strftime("%d %b %Y") if latest else "Unavailable"
+    latest_datetime = latest or ""
+    dependency_stats = stats["dependencies"]
+    resolved_percentage = (
+        dependency_stats["resolved"] / dependency_stats["total"] * 100
+        if dependency_stats["total"]
+        else 0
+    )
+    kind_labels = {"source": "Source crates", "toolchain": "Toolchains", "external": "System externals"}
+    package_kinds = [
+        {**entry, "label": kind_labels.get(entry["label"], entry["label"].title())}
+        for entry in stats["package_kinds"]
+    ]
+    active_rows = []
+    for package in stats["active_packages"]:
+        latest_package = parse_instant(package["latest"])
+        active_rows.append(
+            f'<tr><th scope="row"><a href="../crates/{segment(package["name"])}/">{html.escape(package["name"])}</a></th>'
+            f'<td>{package["changes"]}</td><td><time datetime="{html.escape(package["latest"], quote=True)}">{latest_package.strftime("%d %b %Y")}</time></td></tr>'
+        )
+    active_table = (
+        f'<div class="stats-table-wrap"><table class="active-packages"><thead><tr><th scope="col">Package</th><th scope="col">Change commits</th><th scope="col">Latest</th></tr></thead><tbody>{"".join(active_rows)}</tbody></table></div>'
+        if active_rows
+        else '<p class="stats-unavailable">Git history was unavailable when this site was generated.</p>'
+    )
+    other_label = "Flyology stats" if is_community else "Community stats"
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="License, age, update frequency, freshness, and dependency statistics for the {catalog_label}.">
+    <meta name="theme-color" content="#17213d">
+    <title>Index statistics · {catalog_label}</title>
+    <link rel="canonical" href="{catalog['canonical_url']}stats/">
+    <link rel="icon" href="../flyology-logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="../assets/styles/site.css">
+    <link rel="stylesheet" href="../assets/styles/index.css?v={INDEX_CSS_VERSION}">
+    <script src="../assets/scripts/ada-highlight.js"></script>
+    <script src="../assets/scripts/site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to index statistics</a>
+    {render_site_header('../', 'stats', catalog)}
+    <main class="stats-page page-shell" id="main">
+      <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="../">Index</a><span aria-hidden="true">/</span><span aria-current="page">Stats</span></nav>
+      <header class="stats-hero">
+        <p class="eyebrow">Catalog telemetry</p>
+        <h1>Index statistics.</h1>
+        <p>A build-time view of package composition and maintenance activity for the current {catalog_label}. License and dependency figures use each package's selected release.</p>
+      </header>
+      <dl class="stats-summary" aria-label="Index summary">
+        <div><dt>Packages</dt><dd>{stats['packages']}</dd></div>
+        <div><dt>Indexed releases</dt><dd>{stats['releases']}</dd></div>
+        <div><dt>Catalog age</dt><dd>{html.escape(stats['age_label'])}</dd></div>
+        <div><dt>Latest activity</dt><dd>{f'<time datetime="{html.escape(latest_datetime, quote=True)}">{latest_label}</time>' if latest else latest_label}</dd></div>
+      </dl>
+
+      <section class="stats-section stats-activity" aria-labelledby="activity-title">
+        <header class="stats-section-heading">
+          <div><p class="eyebrow">Update frequency</p><h2 id="activity-title">Twelve months of manifest activity.</h2></div>
+          <p><strong>{stats['monthly_average']:g}</strong> manifest changes per month on average. A single commit may update several manifests.</p>
+        </header>
+        {render_monthly_activity(stats)}
+      </section>
+
+      <div class="stats-split">
+        <section class="stats-section" aria-labelledby="license-title">
+          <header class="stats-compact-heading"><p class="eyebrow">Selected releases</p><h2 id="license-title">License declarations.</h2></header>
+          {render_distribution_chart(stats['licenses'], stats['packages'], compact=True)}
+        </section>
+        <section class="stats-section" aria-labelledby="composition-title">
+          <header class="stats-compact-heading"><p class="eyebrow">Catalog shape</p><h2 id="composition-title">Package and release mix.</h2></header>
+          {render_distribution_chart(package_kinds, stats['packages'])}
+          <div class="release-composition"><h3>Release status</h3>{render_release_mix(stats)}</div>
+        </section>
+      </div>
+
+      <section class="stats-section stats-maintenance" aria-labelledby="maintenance-title">
+        <header class="stats-section-heading">
+          <div><p class="eyebrow">Maintenance pulse</p><h2 id="maintenance-title">Freshness and active packages.</h2></div>
+          <p>Freshness uses the most recent Git commit touching a current manifest. Change counts group multiple manifest edits for one package in the same commit.</p>
+        </header>
+        <div class="maintenance-layout">
+          <div><h3>Packages by latest update</h3>{render_distribution_chart(stats['freshness'], stats['packages'])}</div>
+          <div><h3>Most frequently changed</h3>{active_table}</div>
+        </div>
+      </section>
+
+      <section class="stats-section stats-dependencies" aria-labelledby="dependencies-title">
+        <header class="stats-section-heading">
+          <div><p class="eyebrow">Resolution</p><h2 id="dependencies-title">Dependency reach.</h2></div>
+          <p>Resolution follows index priority and Alire version-set semantics, including provided identities and system externals.</p>
+        </header>
+        <dl class="dependency-summary">
+          <div><dt>Declared dependencies</dt><dd>{dependency_stats['total']}</dd></div>
+          <div><dt>Resolved</dt><dd>{dependency_stats['resolved']} <span>{resolved_percentage:.0f}%</span></dd></div>
+          <div><dt>Resolved across indexes</dt><dd>{dependency_stats['cross_catalog']}</dd></div>
+        </dl>
+      </section>
+
+      <aside class="stats-method" aria-labelledby="method-title">
+        <h2 id="method-title">How these figures are counted</h2>
+        <p>Package age and update activity include only current manifest paths in Git history. Deleted packages are outside this snapshot. Exact SPDX expressions are kept intact, and uncommon license declarations are grouped only in the visual summary.</p>
+        <a class="text-link" href="{other_catalog_stats_href('../', catalog_name)}">Compare with {other_label} <span aria-hidden="true">→</span></a>
+      </aside>
+    </main>
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <p>Generated from the <a href="{repository_url}">{catalog_label}</a>.</p>
+        <div class="footer-links"><a href="{other_catalog_stats_href('../', catalog_name)}">{other_label}</a><a href="../changes/">Change history</a><a href="../crates.json">Aggregate JSON</a></div>
       </div>
     </footer>
   </body>
@@ -2555,6 +2940,71 @@ INDEX_CSS = r"""
 .markdown-body th, .markdown-body td { padding: .55rem .7rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
 .markdown-body th { background: var(--surface); font-weight: 620; }
 .markdown-body hr { margin-block: 2.5rem; border: 0; border-top: 1px solid var(--line); }
+.stats-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
+.stats-hero { max-width: 62rem; padding-block: clamp(4rem, 8vw, 7rem); }
+.stats-hero h1 { max-width: 100%; margin-bottom: 1rem; font-size: clamp(2.8rem, 7vw, 6rem); }
+.stats-hero > p:not(.eyebrow) { max-width: 68ch; margin: 0; color: var(--ink-soft); font-size: 1.05rem; }
+.stats-summary { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-block: 1px solid var(--line); }
+.stats-summary > div { padding: 1.2rem 1.5rem; border-right: 1px solid var(--line); }
+.stats-summary > div:first-child { padding-left: 0; }
+.stats-summary > div:last-child { border-right: 0; }
+.stats-summary dt { color: var(--ink-soft); font-size: .7rem; }
+.stats-summary dd { margin: .22rem 0 0; color: var(--ink); font: 620 1rem var(--font-mono); }
+.stats-section { padding-block: clamp(3.8rem, 8vw, 6.5rem); border-bottom: 1px solid var(--line); }
+.stats-section-heading { display: grid; grid-template-columns: minmax(0, .9fr) minmax(18rem, .55fr); align-items: end; margin-bottom: 3rem; gap: 3rem; }
+.stats-section-heading h2, .stats-compact-heading h2 { max-width: 15ch; margin-bottom: 0; }
+.stats-section-heading > p { max-width: 52ch; margin: 0 0 .3rem; color: var(--ink-soft); }
+.stats-section-heading > p strong { color: var(--ink); font-family: var(--font-mono); }
+.activity-chart { display: grid; grid-template-columns: repeat(12, minmax(2.8rem, 1fr)); min-width: 42rem; height: 18rem; margin: 0; padding: 0 0 .25rem; gap: clamp(.35rem, 1.4vw, 1rem); border-bottom: 1px solid var(--line); list-style: none; }
+.stats-activity { overflow-x: auto; }
+.activity-chart li { display: grid; grid-template-rows: 1.5rem 1fr 1.7rem; align-items: end; min-width: 0; height: 100%; text-align: center; }
+.activity-value { align-self: center; color: var(--ink-soft); font: .64rem var(--font-mono); }
+.activity-track { display: flex; align-items: flex-end; width: 100%; height: 100%; background: linear-gradient(to top, var(--line) 1px, transparent 1px); background-size: 100% 25%; }
+.activity-track > span { display: block; width: 100%; height: max(2px, var(--bar-size)); background: var(--violet); }
+.activity-chart time { align-self: end; padding-top: .5rem; color: var(--ink-soft); font: .58rem var(--font-mono); white-space: nowrap; }
+.stats-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.stats-split .stats-section { min-width: 0; padding-right: clamp(2rem, 6vw, 5rem); border-bottom: 0; }
+.stats-split .stats-section + .stats-section { padding-right: 0; padding-left: clamp(2rem, 6vw, 5rem); border-left: 1px solid var(--line); }
+.stats-compact-heading { margin-bottom: 2.2rem; }
+.distribution-chart { display: grid; margin: 0; padding: 0; gap: 1rem; list-style: none; }
+.distribution-label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; margin-bottom: .35rem; gap: 1rem; font-size: .72rem; }
+.distribution-label > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.distribution-label > span:last-child { color: var(--ink-soft); font-family: var(--font-mono); white-space: nowrap; }
+.distribution-label strong { color: var(--ink); }
+.distribution-track { display: block; height: .55rem; background: var(--surface-strong); }
+.distribution-track > span { display: block; width: var(--bar-size); height: 100%; background: var(--violet); }
+.release-composition { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+.release-composition h3, .maintenance-layout h3 { margin-bottom: 1rem; font-size: .78rem; }
+.release-mix { display: flex; width: 100%; height: .72rem; background: var(--surface-strong); }
+.release-mix > span { width: var(--segment-size); }
+.release-mix-published, .release-key-published { background: var(--teal-deep); }
+.release-mix-development, .release-key-development { background: var(--violet); }
+.release-mix-external, .release-key-external { background: var(--ink-soft); }
+.release-legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: .9rem 0 0; padding: 0; gap: .65rem 1rem; list-style: none; }
+.release-legend li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .4rem; color: var(--ink-soft); font-size: .65rem; }
+.release-legend strong { color: var(--ink); font-family: var(--font-mono); }
+.release-key { width: .55rem; height: .55rem; }
+.maintenance-layout { display: grid; grid-template-columns: minmax(15rem, .68fr) minmax(24rem, 1fr); align-items: start; gap: clamp(3rem, 8vw, 7rem); }
+.stats-table-wrap { overflow-x: auto; }
+.active-packages { width: 100%; border-collapse: collapse; font-size: .72rem; }
+.active-packages th, .active-packages td { padding: .72rem .2rem; border-bottom: 1px solid var(--line); text-align: left; }
+.active-packages thead th { color: var(--ink-soft); font-size: .62rem; font-weight: 500; }
+.active-packages tbody th { font-weight: 620; }
+.active-packages td { color: var(--ink-soft); font-family: var(--font-mono); }
+.active-packages th:nth-child(2), .active-packages td:nth-child(2) { text-align: center; }
+.active-packages th:last-child, .active-packages td:last-child { text-align: right; white-space: nowrap; }
+.dependency-summary { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; border-block: 1px solid var(--line); }
+.dependency-summary > div { padding: 1.2rem 1.5rem; border-right: 1px solid var(--line); }
+.dependency-summary > div:first-child { padding-left: 0; }
+.dependency-summary > div:last-child { border-right: 0; }
+.dependency-summary dt { color: var(--ink-soft); font-size: .7rem; }
+.dependency-summary dd { margin: .22rem 0 0; font: 620 1.15rem var(--font-mono); }
+.dependency-summary dd span { color: var(--ink-soft); font-size: .65em; font-weight: 400; }
+.stats-method { display: grid; grid-template-columns: minmax(11rem, .32fr) minmax(0, 1fr) auto; align-items: start; padding-block: 2.2rem; gap: 2rem; }
+.stats-method h2 { margin: 0; font-size: .85rem; }
+.stats-method p { max-width: 68ch; margin: 0; color: var(--ink-soft); font-size: .76rem; }
+.stats-method .text-link { margin: 0; white-space: nowrap; }
+.stats-unavailable { margin: 0; padding-block: 2rem; color: var(--ink-soft); font-size: .8rem; }
 .changes-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
 .changes-hero { max-width: 58rem; padding-block: clamp(4rem, 8vw, 7rem); }
 .changes-hero h1 { max-width: 100%; margin-bottom: 1rem; font-size: clamp(2.8rem, 7vw, 6rem); }
@@ -2608,6 +3058,12 @@ INDEX_CSS = r"""
   .metadata { grid-template-columns: 1fr; }
   .metadata div:nth-child(odd) { margin-right: 0; }
   .change-group-entries { margin-left: 0; }
+  .stats-section-heading { grid-template-columns: 1fr; gap: 1.2rem; }
+  .stats-split { grid-template-columns: 1fr; }
+  .stats-split .stats-section { padding-right: 0; border-bottom: 1px solid var(--line); }
+  .stats-split .stats-section + .stats-section { padding-left: 0; border-left: 0; border-bottom: 0; }
+  .maintenance-layout { grid-template-columns: 1fr; }
+  .stats-method { grid-template-columns: 1fr; gap: 1rem; }
 }
 @media (max-width: 640px) {
   .catalog-stats .page-shell { grid-template-columns: repeat(2, 1fr); }
@@ -2634,6 +3090,14 @@ INDEX_CSS = r"""
   .dependant-release code { grid-area: 2 / 1 / 3 / -1; }
   .version-links a { grid-template-columns: 1fr; }
   .version-link-status { justify-content: flex-start; }
+  .stats-summary { grid-template-columns: repeat(2, 1fr); }
+  .stats-summary > div:nth-child(2) { border-right: 0; }
+  .stats-summary > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .stats-summary > div:nth-child(3) { padding-left: 0; }
+  .release-legend { grid-template-columns: 1fr; }
+  .dependency-summary { grid-template-columns: 1fr; }
+  .dependency-summary > div, .dependency-summary > div:first-child { padding-inline: 0; border-right: 0; border-bottom: 1px solid var(--line); }
+  .dependency-summary > div:last-child { border-bottom: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .package-summary, .summary-action span { transition: none; }
@@ -2787,6 +3251,7 @@ The JSON resources are generated directly from indexed TOML manifests and preser
 - [Catalog home]({canonical_url}): Browse and search this Alire index.
 - [Aggregate JSON catalog]({canonical_url}crates.json): Complete package and version inventory, including every parsed manifest.
 - [Change history]({canonical_url}changes/): Publications and manifest updates derived from Git history.
+- [Index statistics]({canonical_url}stats/): License, composition, dependency, age, freshness, and update-frequency summaries.
 - [JSON schema notes]({canonical_url}README.txt): Field semantics and endpoint conventions.
 
 ## Packages
@@ -2874,6 +3339,7 @@ def write_json(path: Path, value: Any) -> None:
 def write_catalog_site(
     catalog: dict[str, Any],
     history: list[dict[str, Any]],
+    stats: dict[str, Any],
     output: Path,
     release_documents: dict[str, ReleaseDocuments] | None = None,
 ) -> None:
@@ -2882,6 +3348,7 @@ def write_catalog_site(
     (output / "assets" / "scripts").mkdir(parents=True)
     (output / "crates").mkdir(parents=True)
     (output / "changes").mkdir(parents=True)
+    (output / "stats").mkdir(parents=True)
 
     write_json(output / "crates.json", catalog)
     shared = {
@@ -2938,6 +3405,9 @@ def write_catalog_site(
     (output / "changes" / "index.html").write_text(
         render_changes_page(catalog, history), encoding="utf-8"
     )
+    (output / "stats" / "index.html").write_text(
+        render_stats_page(catalog, stats), encoding="utf-8"
+    )
     (output / "assets" / "styles" / "index.css").write_text(
         INDEX_CSS.strip() + "\n", encoding="utf-8"
     )
@@ -2977,10 +3447,18 @@ def generate(
     attach_resolved_dependencies(relationship_packages)
 
     history = load_change_history(catalog, source.parent)
+    stats = load_catalog_statistics(catalog, source.parent, source)
     community_history = (
         load_change_history(community_catalog, community_source.parent)
         if community_catalog is not None and community_source is not None
         else []
+    )
+    community_stats = (
+        load_catalog_statistics(
+            community_catalog, community_source.parent, community_source
+        )
+        if community_catalog is not None and community_source is not None
+        else None
     )
     release_documents: dict[str, ReleaseDocuments] = {}
     if include_source_documents:
@@ -3014,11 +3492,13 @@ def generate(
                 temporary_cache.cleanup()
     if output.exists():
         shutil.rmtree(output)
-    write_catalog_site(catalog, history, output, release_documents)
+    write_catalog_site(catalog, history, stats, output, release_documents)
     if community_catalog is not None:
+        assert community_stats is not None
         write_catalog_site(
             community_catalog,
             community_history,
+            community_stats,
             output / "community",
         )
     (output / ".nojekyll").write_text("", encoding="utf-8")
