@@ -1471,6 +1471,191 @@ def field(label: str, value: Any, *, link: bool = False) -> str:
     return f"<div><dt>{html.escape(label)}</dt><dd>{rendered}</dd></div>"
 
 
+def linked_field(label: str, links: list[tuple[str, str]]) -> str:
+    """Render an already validated list of labelled HTTP links."""
+    if not links:
+        return ""
+    rendered = ", ".join(
+        f'<a href="{html.escape(url, quote=True)}">{html.escape(caption)}</a>'
+        for caption, url in links
+    )
+    return f"<div><dt>{html.escape(label)}</dt><dd>{rendered}</dd></div>"
+
+
+def http_url(value: Any) -> str | None:
+    """Return VALUE as a browser URL, accepting Alire's ``git+`` prefix."""
+    if not isinstance(value, str):
+        return None
+    candidate = source_repository_url(value)
+    parsed = urlsplit(candidate)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        return None
+    return candidate
+
+
+def url_caption(value: str) -> str:
+    """Keep provenance recognisable without repeating a URL scheme."""
+    parsed = urlsplit(value)
+    return f"{parsed.netloc}{parsed.path}".removesuffix(".git").rstrip("/")
+
+
+def direct_origin(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    origin = manifest.get("origin")
+    if not isinstance(origin, dict) or http_url(origin.get("url")) is None:
+        return None
+    return origin
+
+
+def is_git_origin(manifest: dict[str, Any]) -> bool:
+    origin = direct_origin(manifest)
+    if origin is None:
+        return False
+    return bool(origin.get("commit")) or str(origin.get("url", "")).startswith("git+")
+
+
+def hosted_repository_url(value: str) -> str | None:
+    """Infer a repository page from a well-known hosted archive URL."""
+    parsed = urlsplit(value)
+    parts = [part for part in parsed.path.split("/") if part]
+    host = parsed.netloc.lower()
+    if (
+        host == "github.com"
+        and len(parts) >= 3
+        and parts[2] in ("archive", "releases")
+    ):
+        return f"{parsed.scheme}://{parsed.netloc}/{parts[0]}/{parts[1]}"
+    if host == "gitlab.com" and "-" in parts:
+        marker = parts.index("-")
+        if (
+            marker >= 2
+            and len(parts) > marker + 1
+            and parts[marker + 1] in ("archive", "releases")
+        ):
+            return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts[:marker])}"
+    return None
+
+
+def origin_urls(value: Any) -> list[str]:
+    """Collect browser-safe URLs from direct and conditional origin trees."""
+    if not isinstance(value, dict):
+        return []
+    urls = []
+    url = http_url(value.get("url"))
+    if url is not None:
+        urls.append(url)
+    for key, child in value.items():
+        if key != "url":
+            urls.extend(origin_urls(child))
+    return urls
+
+
+def repository_url(manifest: dict[str, Any]) -> str | None:
+    origin = direct_origin(manifest)
+    if origin is not None:
+        url = http_url(origin["url"])
+        assert url is not None
+        if is_git_origin(manifest):
+            return url.rstrip("/").removesuffix(".git")
+        return hosted_repository_url(url)
+    repositories = {
+        repository
+        for url in origin_urls(manifest.get("origin"))
+        if (repository := hosted_repository_url(url)) is not None
+    }
+    return next(iter(repositories)) if len(repositories) == 1 else None
+
+
+def revision_url(manifest: dict[str, Any]) -> str | None:
+    """Link an indexed revision to the exact source directory on GitHub."""
+    origin = direct_origin(manifest)
+    repository = repository_url(manifest)
+    if (
+        origin is None
+        or not is_git_origin(manifest)
+        or repository is None
+        or not origin.get("commit")
+    ):
+        return None
+    parsed = urlsplit(repository)
+    if parsed.netloc.lower() == "github.com":
+        target = f"{repository}/tree/{quote(str(origin['commit']), safe='')}"
+    elif parsed.netloc.lower() == "gitlab.com":
+        target = f"{repository}/-/tree/{quote(str(origin['commit']), safe='')}"
+    else:
+        return None
+    subdir = origin.get("subdir")
+    if isinstance(subdir, str) and subdir:
+        clean_subdir = "/".join(
+            part for part in PurePosixPath(subdir).parts if part not in ("", ".")
+        )
+        if clean_subdir:
+            target += "/" + quote(clean_subdir, safe="/")
+    return target
+
+
+def maintainer_profile_links(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    links = []
+    for login in manifest.get("maintainers-logins", []):
+        if isinstance(login, str) and re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login
+        ):
+            links.append((f"@{login}", f"https://github.com/{login}"))
+    return links
+
+
+def origin_artifact_links(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect conditional binary/archive URLs from a structured origin."""
+    origin = manifest.get("origin")
+    if not isinstance(origin, dict) or is_git_origin(manifest):
+        return []
+    artifacts: list[tuple[str, str]] = []
+
+    def visit(value: Any, conditions: tuple[str, ...] = ()) -> None:
+        if not isinstance(value, dict):
+            return
+        url = http_url(value.get("url"))
+        if url is not None:
+            caption = " / ".join(conditions) if conditions else url_caption(url)
+            artifacts.append((caption, url))
+        for key, child in value.items():
+            if key in ("url", "hashes", "binary"):
+                continue
+            next_conditions = conditions if key.startswith("case(") else (*conditions, key)
+            visit(child, next_conditions)
+
+    if direct_origin(manifest) is not None:
+        url = http_url(origin.get("url"))
+        if url is not None:
+            artifacts.append((str(origin.get("archive-name") or url_caption(url)), url))
+    else:
+        visit(origin)
+    return artifacts
+
+
+def manifest_resource_links(
+    manifest: dict[str, Any], *, css_class: str | None = None
+) -> str:
+    """Render prominent project links without duplicating identical targets."""
+    links: list[tuple[str, str]] = []
+    website = http_url(manifest.get("website"))
+    repository = repository_url(manifest)
+    if website is not None:
+        label = "GitHub" if urlsplit(website).netloc.lower() == "github.com" else "Website"
+        links.append((label, website))
+    if repository is not None and repository.rstrip("/") != (
+        website or ""
+    ).removesuffix(".git").rstrip("/"):
+        links.append(("Repository", repository))
+    class_attribute = (
+        f' class="{html.escape(css_class, quote=True)}"' if css_class else ""
+    )
+    return "".join(
+        f'<a{class_attribute} href="{html.escape(url, quote=True)}">'
+        f"{html.escape(label)}</a>"
+        for label, url in links
+    )
+
+
 def matching_dependency_release(
     packages: list[dict[str, Any]], required: str, requirement: str
 ) -> tuple[dict[str, Any], dict[str, Any], str] | None:
@@ -1713,6 +1898,83 @@ def origin_summary(manifest: dict[str, Any]) -> str:
     return "Platform-specific binary archives"
 
 
+DISPLAYED_MANIFEST_FIELDS = {
+    "name",
+    "version",
+    "description",
+    "long-description",
+    "authors",
+    "maintainers",
+    "maintainers-logins",
+    "licenses",
+    "website",
+    "tags",
+    "provides",
+    "project-files",
+    "executables",
+    "available",
+    "auto-gpr-with",
+    "origin",
+    "depends-on",
+}
+
+
+TECHNICAL_FIELD_LABELS = {
+    "actions": "Actions",
+    "build-switches": "Build switches",
+    "configuration": "Configuration",
+    "environment": "Environment",
+    "forbids": "Conflicts",
+    "gpr-externals": "GPR externals",
+    "gpr-set-externals": "GPR values",
+    "pins": "Pins",
+    "test": "Test settings",
+}
+
+
+def technical_manifest_fields(manifest: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Return lower-frequency manifest fields not represented elsewhere."""
+    fields = [
+        (TECHNICAL_FIELD_LABELS.get(key, key.replace("-", " ").capitalize()), value)
+        for key, value in manifest.items()
+        if key not in DISPLAYED_MANIFEST_FIELDS
+    ]
+    origin = manifest.get("origin")
+    if isinstance(origin, dict):
+        if direct_origin(manifest) is None:
+            fields.append(("Artifact origin rules", origin))
+        else:
+            remainder = {
+                key: value
+                for key, value in origin.items()
+                if key not in ("url", "commit", "subdir")
+            }
+            if remainder:
+                fields.append(("Additional origin data", remainder))
+    return fields
+
+
+def render_technical_manifest(manifest: dict[str, Any]) -> str:
+    fields = technical_manifest_fields(manifest)
+    if not fields:
+        return ""
+    rows = []
+    for label, value in fields:
+        rendered = html.escape(
+            json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True)
+        )
+        rows.append(
+            f"<div><dt>{html.escape(label)}</dt>"
+            f"<dd><pre><code>{rendered}</code></pre></dd></div>"
+        )
+    count = counted(len(fields), "field")
+    return f"""
+        <details class="technical-metadata">
+          <summary>Build and platform metadata <span>{count}</span></summary>
+          <dl>{''.join(rows)}</dl>
+        </details>"""
+
+
 def package_kind(manifest: dict[str, Any]) -> str:
     if manifest.get("external"):
         return "external"
@@ -1728,15 +1990,40 @@ def status_badge(release: dict[str, Any], *, development_only: bool = False) -> 
 
 def release_metadata(release: dict[str, Any]) -> str:
     manifest = release["manifest"]
+    origin = direct_origin(manifest)
+    repository = repository_url(manifest)
+    revision = revision_url(manifest)
+    commit = origin.get("commit") if origin is not None else None
+    artifacts = origin_artifact_links(manifest)
+    artifact_label = (
+        "Release archive"
+        if direct_origin(manifest) is not None and not is_git_origin(manifest)
+        else "Release artifacts"
+    )
     return "".join(
         [
             field("Authors", manifest.get("authors")),
             field("Maintainers", manifest.get("maintainers")),
+            linked_field("Maintainer profiles", maintainer_profile_links(manifest)),
             field("Licenses", manifest.get("licenses")),
             field("Website", manifest.get("website"), link=True),
+            linked_field(
+                "Repository",
+                [(url_caption(repository), repository)] if repository is not None else [],
+            ),
+            linked_field(
+                "Source revision",
+                [(str(commit)[:12], revision)] if commit and revision is not None else [],
+            )
+            or field("Source revision", str(commit)[:12] if commit else None),
+            field("Source directory", origin.get("subdir") if origin is not None else None),
+            linked_field(artifact_label, artifacts),
+            field("Tags", manifest.get("tags")),
             field("Provides", manifest.get("provides")),
             field("Project files", manifest.get("project-files")),
-            field("Origin", origin_summary(manifest)),
+            field("Executables", manifest.get("executables")),
+            field("Availability", manifest.get("available")),
+            field("Automatic GPR dependency", manifest.get("auto-gpr-with")),
             field("Manifest", release["path"]),
         ]
     )
@@ -1822,6 +2109,7 @@ def render_release_detail(
             ),
         )}
         <dl class="metadata">{release_metadata(release)}</dl>
+        {render_technical_manifest(manifest)}
         {relationships}
         {raw_manifest}
       </section>"""
@@ -1907,7 +2195,6 @@ def render_package(
     search = " ".join(
         [package["name"], package["description"], package["selected_version"], *tags]
     ).lower()
-    tag_html = "".join(f"<li>{html.escape(tag)}</li>" for tag in tags)
     name = segment(package["name"])
     version = segment(selected["version"])
     return f"""
@@ -1924,8 +2211,8 @@ def render_package(
       <div class="package-body">
         <div class="package-facts">
           <span class="kind-label">{kind.capitalize()}</span>
-          <ul class="tag-list" aria-label="Tags">{tag_html}</ul>
           <span class="package-links">
+            {manifest_resource_links(manifest)}
             <a href="crates/{name}/">Crate page</a>
             <a href="crates/{name}/{version}/">Version page</a>
             <a href="crates/{name}.json" download>JSON</a>
@@ -2729,6 +3016,7 @@ def render_detail_page(
         <div class="crate-release-line"><code>{html.escape(version)}</code>{status_badge(release, development_only=package['development_only'])}</div>
         <p>{html.escape(description)}</p>
         <div class="actions">
+          {manifest_resource_links(release['manifest'], css_class='button button-secondary')}
           {package_action}
           <a class="button button-secondary" href="{json_href}" download>Download JSON</a>
         </div>
@@ -2828,6 +3116,15 @@ INDEX_CSS = r"""
 .metadata div:nth-child(odd) { margin-right: 1.2rem; }
 .metadata dt { color: var(--ink-soft); font-size: .7rem; }
 .metadata dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font: .72rem/1.55 var(--font-mono); }
+.metadata dd a { text-underline-offset: .16em; }
+.technical-metadata { margin-top: 1.25rem; border-bottom: 1px solid var(--line); }
+.technical-metadata > summary { display: flex; align-items: center; justify-content: space-between; padding: .75rem .2rem; gap: 1rem; color: var(--ink); font-size: .76rem; font-weight: 620; cursor: pointer; }
+.technical-metadata > summary span { color: var(--ink-soft); font: 400 .68rem var(--font-mono); }
+.technical-metadata dl { margin: 0; }
+.technical-metadata dl > div { padding: .85rem .2rem; border-top: 1px solid var(--line); }
+.technical-metadata dt { margin-bottom: .45rem; color: var(--ink-soft); font-size: .7rem; }
+.technical-metadata dd { min-width: 0; margin: 0; }
+.technical-metadata pre { margin: 0; padding: .7rem .8rem; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: .68rem; line-height: 1.6; }
 .detail-section { margin-top: 1.6rem; }
 .detail-section h4 { margin-bottom: .7rem; font-size: .82rem; }
 .quiet { color: var(--ink-soft); font-size: .8rem; }

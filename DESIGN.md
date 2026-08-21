@@ -91,8 +91,12 @@ the complete release without duplicating every manifest on the front page.
   measure and is separated by rules rather than nested in decorative cards.
 - Full crate pages keep indexed versions, dependencies, dependants, and the
   direct manifest JSON download together in a right-hand information rail.
-  The main release column contains the manifest metadata without repeating the
-  complete JSON inline. Dependency rows link to the highest indexed release
+  The main release column promotes project links and source provenance, then
+  presents package metadata without repeating the complete JSON inline.
+  Repository revisions link to the exact supported forge tree and conditional
+  artifact origins remain directly downloadable. Lower-frequency build, environment,
+  configuration, and origin data uses one native disclosure after the primary
+  facts. Dependency rows link to the highest indexed release
   admitted by their version set in index-priority order, including community
   releases, system externals, conditional branches, and releases matched
   through `provides`. Each row identifies whether Flyology or community

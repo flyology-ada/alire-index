@@ -64,7 +64,13 @@ Human-readable routes include:
 
 The package page selects the newest published version. If a crate has only
 `-dev` manifests, it selects the newest development version and identifies the
-crate as development-only. Full crate and version pages also render the nearest
+crate as development-only. Homepage disclosures, crate pages, and version pages
+expose project and repository links, the exact linked source revision and
+subdirectory, maintainer profiles, release artifacts, availability, tags,
+executables, and other package-level metadata. Lower-frequency build switches,
+actions, environment, configuration, and conditional origin rules remain
+available in a compact **Build and platform metadata** disclosure. Full crate
+and version pages also render the nearest
 `README.md` found from the manifest origin's `subdir` upward, at the exact
 indexed commit. If the same search finds a `CHANGELOG.md`, the section headed
 by that page's exact version is rendered as release notes, with the remaining

@@ -72,6 +72,52 @@ class GenerateSiteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             generate_site.path_segment("../escape")
 
+    def test_git_and_archive_origins_render_as_distinct_resources(self) -> None:
+        git_manifest = {
+            "origin": {
+                "url": "git+https://gitlab.com/example/group/project.git",
+                "commit": "a" * 40,
+                "subdir": "./crates/example/",
+            }
+        }
+        git_release = {
+            "path": "index/ex/example/example-1.0.0.toml",
+            "manifest": git_manifest,
+        }
+        git_metadata = generate_site.release_metadata(git_release)
+        self.assertIn(
+            'href="https://gitlab.com/example/group/project">'
+            "gitlab.com/example/group/project</a>",
+            git_metadata,
+        )
+        self.assertIn(
+            f'href="https://gitlab.com/example/group/project/-/tree/{"a" * 40}/crates/example"',
+            git_metadata,
+        )
+        self.assertNotIn("git+https://", git_metadata)
+        self.assertNotIn("Release archive", git_metadata)
+
+        archive_url = "https://github.com/example/project/archive/refs/tags/v1.0.0.tar.gz"
+        archive_manifest = {
+            "origin": {
+                "url": archive_url,
+                "archive-name": "project-1.0.0.tar.gz",
+                "hashes": ["sha512:abc"],
+            }
+        }
+        archive_release = {
+            "path": "index/ex/example/example-1.0.0.toml",
+            "manifest": archive_manifest,
+        }
+        archive_metadata = generate_site.release_metadata(archive_release)
+        self.assertIn('href="https://github.com/example/project"', archive_metadata)
+        self.assertIn(">Release archive</dt>", archive_metadata)
+        self.assertIn(
+            f'href="{archive_url}">project-1.0.0.tar.gz</a>', archive_metadata
+        )
+        self.assertNotIn(">Source revision</dt>", archive_metadata)
+        self.assertIn("sha512:abc", generate_site.render_technical_manifest(archive_manifest))
+
     def test_llms_file_describes_catalog_and_every_package(self) -> None:
         document = (self.output / "llms.txt").read_text(encoding="utf-8")
         self.assertTrue(document.startswith("# Flyology Crate Index\n\n> "))
@@ -256,6 +302,41 @@ class GenerateSiteTests(unittest.TestCase):
                     version_page.index(">Dependants</h3>"),
                     version_page.index("Complete manifest as JSON"),
                 )
+
+    def test_crate_and_inline_pages_publish_manifest_provenance(self) -> None:
+        home = (self.output / "index.html").read_text(encoding="utf-8")
+        crate = (
+            self.output / "crates" / "flyology" / "index.html"
+        ).read_text(encoding="utf-8")
+        version = (
+            self.output / "crates" / "flyology" / "0.1.0" / "index.html"
+        ).read_text(encoding="utf-8")
+        repository = "https://github.com/flyology-ada/flyology"
+        revision = "8e0461080e0f110b3bf70dbff283af9ca5e53a2c"
+
+        for page in (home, crate, version):
+            self.assertIn(f'href="{repository}"', page)
+            self.assertIn('href="https://github.com/yrashk">@yrashk</a>', page)
+            self.assertIn(">Source revision</dt>", page)
+            self.assertIn(f'href="{repository}/tree/{revision}"', page)
+            self.assertIn(">Availability</dt>", page)
+            self.assertIn("Build and platform metadata", page)
+
+    def test_conditional_artifact_origins_are_linked_and_preserved(self) -> None:
+        page = (
+            self.output
+            / "crates"
+            / "gnat_flyology_native"
+            / "16.2.0-patchset.1.1.0"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(">Release artifacts</dt>", page)
+        self.assertIn(">linux / x86-64</a>", page)
+        self.assertIn(">linux / aarch64</a>", page)
+        self.assertIn(">macos / aarch64</a>", page)
+        self.assertIn("Artifact origin rules", page)
+        self.assertIn("sha256:d7f96968ab1ad01f", page)
 
     def test_relationship_names_link_to_the_highest_matching_versions(self) -> None:
         page = (
