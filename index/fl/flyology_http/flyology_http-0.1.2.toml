@@ -1,0 +1,24 @@
+name = "flyology_http"
+description = "HTTP client and server library for Flyology tasks"
+version = "0.1.2"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://http.flyology.org/"
+tags = ["ada", "http", "client", "server", "websocket", "sse"]
+project-files = ["flyology_http.gpr"]
+
+[[depends-on]]
+flyology = "=0.1.0"
+flyology_cachelines = "=0.1.0"
+flyology_quic = "=0.1.1"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "8f34e73b49b1f6b61e3f4a86a56fe2650d0ff1ca"
+url = "git+https://github.com/flyology-ada/flyology-http.git"
