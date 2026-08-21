@@ -312,6 +312,13 @@ class GenerateSiteTests(unittest.TestCase):
                 '''name = "consumer"
 version = "1.0.0"
 description = "Uses community packages"
+long-description = """
+Flyology **consumer details**.
+
+## Setup
+
+Use the selected community dependencies.
+"""
 
 [[depends-on]]
 aunit = "^1.0.0"
@@ -328,7 +335,18 @@ system_random = "*"
             aunit = community_source / "au" / "aunit"
             aunit.mkdir(parents=True)
             (aunit / "aunit-1.0.0.toml").write_text(
-                'name = "aunit"\nversion = "1.0.0"\ndescription = "Ada tests"\n',
+                '''name = "aunit"
+version = "1.0.0"
+description = "Ada tests"
+website = "https://example.com/aunit"
+long-description = """
+Community **testing details**.
+
+[License](LICENSE) · [More documentation](#elsewhere)
+
+<script>alert('unsafe')</script>
+"""
+''',
                 encoding="utf-8",
             )
             system_random = community_source / "sy" / "system_random"
@@ -365,6 +383,18 @@ system_random = "*"
             self.assertIn(
                 'href="../../../community/crates/system_random/system/"', consumer_page
             )
+            self.assertIn('class="release-long-description"', consumer_page)
+            self.assertIn("Flyology <strong>consumer details</strong>.", consumer_page)
+            self.assertIn(
+                'id="long-description-consumer-1.0.0-setup"', consumer_page
+            )
+
+            consumer_crate_page = (
+                output / "crates" / "consumer" / "index.html"
+            ).read_text(encoding="utf-8")
+            flyology_home = (output / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Flyology <strong>consumer details</strong>.", consumer_crate_page)
+            self.assertIn("Flyology <strong>consumer details</strong>.", flyology_home)
 
             community_home = (output / "community" / "index.html").read_text(
                 encoding="utf-8"
@@ -381,6 +411,14 @@ system_random = "*"
             self.assertIn("aunit <code>1.0.0</code>", community_changes)
             self.assertIn('href="../../../../crates/consumer/1.0.0/"', aunit_page)
             self.assertIn("Flyology", aunit_page)
+            self.assertIn("Community <strong>testing details</strong>.", aunit_page)
+            self.assertNotIn("<script>", aunit_page)
+            self.assertNotIn("alert", aunit_page)
+            self.assertIn('href="https://example.com/aunit/LICENSE"', aunit_page)
+            self.assertIn(
+                'href="https://example.com/aunit/#elsewhere"', aunit_page
+            )
+            self.assertIn("Community <strong>testing details</strong>.", community_home)
             self.assertTrue((output / "community" / "crates.json").is_file())
             self.assertTrue(
                 (output / "community" / "crates" / "aunit.json").is_file()

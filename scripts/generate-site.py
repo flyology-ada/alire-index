@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime, time
 from itertools import groupby
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -447,10 +447,14 @@ def rewrite_source_url(value: str, document: SourceDocument, *, image: bool) -> 
     return urlunsplit((*urlsplit(rewritten)[:3], parsed_value.query, parsed_value.fragment))
 
 
-def render_source_markdown(
-    document: SourceDocument, *, anchor_prefix: str = ""
+def render_markdown(
+    markdown: str,
+    *,
+    anchor_prefix: str = "",
+    source_document: SourceDocument | None = None,
+    relative_url_base: str | None = None,
 ) -> str:
-    """Render CommonMark safely, resolving relative links to the pinned tree."""
+    """Render CommonMark safely, optionally resolving links to a pinned tree."""
     try:
         from markdown_it import MarkdownIt
     except ImportError as error:
@@ -464,7 +468,7 @@ def render_source_markdown(
     )
     renderer.renderer.rules["html_block"] = lambda *_args: ""
     renderer.renderer.rules["html_inline"] = lambda *_args: ""
-    tokens = renderer.parse(document.markdown)
+    tokens = renderer.parse(markdown)
     heading_levels = [
         int(token.tag[1:])
         for token in tokens
@@ -472,6 +476,7 @@ def render_source_markdown(
     ]
     heading_offset = 3 - min(heading_levels) if heading_levels else 0
     heading_slugs: dict[str, int] = defaultdict(int)
+    heading_targets: set[str] = set()
     for index, token in enumerate(tokens):
         if token.type in ("heading_open", "heading_close"):
             token.tag = f"h{min(6, int(token.tag[1:]) + heading_offset)}"
@@ -487,27 +492,57 @@ def render_source_markdown(
             occurrence = heading_slugs[base_slug]
             heading_slugs[base_slug] += 1
             slug = base_slug if occurrence == 0 else f"{base_slug}-{occurrence}"
+            heading_targets.add(slug)
             if anchor_prefix:
                 slug = f"{anchor_prefix}-{slug}"
             token.attrSet("id", slug)
+    for token in tokens:
         if token.type != "inline":
             continue
         for child in token.children or []:
             if child.type == "link_open":
                 href = child.attrGet("href")
                 if href is not None:
-                    if anchor_prefix and href.startswith("#"):
+                    if (
+                        anchor_prefix
+                        and href.startswith("#")
+                        and href[1:] in heading_targets
+                    ):
                         href = f"#{anchor_prefix}-{href[1:]}"
-                    child.attrSet(
-                        "href", rewrite_source_url(href, document, image=False)
-                    )
+                    elif source_document is not None:
+                        href = rewrite_source_url(
+                            href, source_document, image=False
+                        )
+                    elif relative_url_base is not None:
+                        parsed = urlsplit(href)
+                        if not parsed.scheme and not parsed.netloc:
+                            href = urljoin(relative_url_base, href)
+                    child.attrSet("href", href)
             elif child.type == "image":
                 source = child.attrGet("src")
-                if source is not None:
+                if source is not None and source_document is not None:
                     child.attrSet(
-                        "src", rewrite_source_url(source, document, image=True)
+                        "src",
+                        rewrite_source_url(
+                            source, source_document, image=True
+                        ),
                     )
+                elif source is not None and relative_url_base is not None:
+                    parsed = urlsplit(source)
+                    if not parsed.scheme and not parsed.netloc:
+                        child.attrSet("src", urljoin(relative_url_base, source))
     return renderer.renderer.render(tokens, renderer.options, {})
+
+
+def render_source_markdown(
+    document: SourceDocument, *, anchor_prefix: str = ""
+) -> str:
+    """Render CommonMark safely, resolving relative links to the pinned tree."""
+    return render_markdown(
+        document.markdown,
+        anchor_prefix=anchor_prefix,
+        source_document=document,
+    )
 
 
 CHANGELOG_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
@@ -1522,6 +1557,37 @@ def release_metadata(release: dict[str, Any]) -> str:
     )
 
 
+def render_long_description(
+    manifest: dict[str, Any], *, anchor_prefix: str
+) -> str:
+    markdown = manifest.get("long-description")
+    if not isinstance(markdown, str) or not markdown.strip():
+        return ""
+    base_url = None
+    for candidate in (
+        manifest.get("website"),
+        manifest.get("origin", {}).get("url")
+        if isinstance(manifest.get("origin"), dict)
+        else None,
+    ):
+        if not isinstance(candidate, str):
+            continue
+        candidate = source_repository_url(candidate).removesuffix(".git")
+        parsed = urlsplit(candidate)
+        if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+            base_url = f"{candidate.rstrip('/')}/"
+            break
+    rendered = render_markdown(
+        markdown,
+        anchor_prefix=anchor_prefix,
+        relative_url_base=base_url,
+    )
+    return f"""
+        <section class="release-long-description" aria-label="Long description">
+          <div class="markdown-body">{rendered}</div>
+        </section>"""
+
+
 def render_release_detail(
     package_name: str,
     release: dict[str, Any],
@@ -1563,6 +1629,13 @@ def render_release_detail(
           <{heading} id="release-{html.escape(package_name)}-{html.escape(release['version'])}">{html.escape(release['version'])}</{heading}>
           {status_badge(release)}
         </div>
+        {render_long_description(
+            manifest,
+            anchor_prefix=(
+                f"long-description-{segment(package_name)}-"
+                f"{segment(release['version'])}"
+            ),
+        )}
         <dl class="metadata">{release_metadata(release)}</dl>
         {relationships}
         {raw_manifest}
@@ -2363,6 +2436,8 @@ INDEX_CSS = r"""
 .release-detail { min-width: 0; }
 .release-heading { display: flex; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; gap: .7rem; }
 .release-heading h2, .release-heading h3 { margin: 0; font-size: 1.15rem; letter-spacing: -.018em; }
+.release-long-description { margin: 0 0 1.8rem; }
+.release-long-description .markdown-body { max-width: 68ch; }
 .metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--line); }
 .metadata div { display: grid; grid-template-columns: 8rem 1fr; padding: .75rem .2rem; gap: 1rem; border-bottom: 1px solid var(--line); }
 .metadata div:nth-child(odd) { margin-right: 1.2rem; }
