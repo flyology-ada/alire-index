@@ -24,10 +24,12 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_URL = "https://crates.flyology.org/"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CHANGE_HISTORY_LIMIT = 200
 HOME_CHANGE_LIMIT = 6
 REPOSITORY_URL = "https://github.com/flyology-ada/alire-index"
+COMMUNITY_REPOSITORY_URL = "https://github.com/alire-project/alire-index"
+COMMUNITY_CANONICAL_URL = f"{CANONICAL_URL}community/"
 
 
 def json_value(value: Any) -> Any:
@@ -351,7 +353,12 @@ def requirement_admits(requirement: str, version: str) -> bool:
 def select_release(releases: list[dict[str, Any]]) -> dict[str, Any]:
     """Prefer the newest published release, falling back to the newest dev."""
     return next(
-        (release for release in releases if not is_development_version(release["version"])),
+        (
+            release
+            for release in releases
+            if not release.get("external")
+            and not is_development_version(release["version"])
+        ),
         releases[0],
     )
 
@@ -362,6 +369,13 @@ def release_for(package: dict[str, Any], version: str) -> dict[str, Any]:
 
 def segment(value: str) -> str:
     return quote(value, safe="")
+
+
+def path_segment(value: str) -> str:
+    """Return the decoded filesystem name corresponding to one URL segment."""
+    if not value or value in (".", "..") or "/" in value or "\\" in value:
+        raise ValueError(f"unsafe path segment: {value!r}")
+    return value
 
 
 class SourceDocument(NamedTuple):
@@ -761,27 +775,44 @@ def provided_identities(
     return list(identities.items())
 
 
-def dependency_index(packages: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Map every required crate name to the indexed releases that require it.
+def dependency_declarations(
+    manifest: dict[str, Any],
+) -> list[tuple[str, str, str | None]]:
+    """Return every dependency and the conditional branch that declares it."""
+    declarations: list[tuple[str, str, str | None]] = []
 
-    A dependency stated as a dynamic expression raises. Such an entry has no one
-    crate name and no one version set, so it would drop out of the index and
-    understate a crate's dependants without saying so.
-    """
+    def visit(mapping: dict[str, Any], conditions: tuple[str, ...] = ()) -> None:
+        for name, value in mapping.items():
+            if name.lower().startswith("case(") and isinstance(value, dict):
+                for branch, branch_value in value.items():
+                    if isinstance(branch_value, dict):
+                        visit(
+                            branch_value,
+                            (*conditions, f"{name}={branch}"),
+                        )
+                continue
+            if isinstance(value, str):
+                declarations.append(
+                    (name, value, " & ".join(conditions) or None)
+                )
+
+    for group in manifest.get("depends-on", []):
+        if isinstance(group, dict):
+            visit(group)
+    return declarations
+
+
+def dependency_index(packages: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Map every required crate name to the indexed releases that require it."""
     index: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for package in packages:
         for release in package["versions"]:
-            for group in release["manifest"].get("depends-on", []):
-                for required, requirement in group.items():
-                    if not isinstance(requirement, str):
-                        raise ValueError(
-                            f"{release['path']} declares {required!r} as a dynamic "
-                            "expression rather than a version set; the dependant "
-                            "index cannot resolve conditional dependencies"
-                        )
-            for required, requirement in dependency_map(release["manifest"]).items():
+            for required, requirement, condition in dependency_declarations(
+                release["manifest"]
+            ):
                 index[required.lower()].append(
                     {
+                        "catalog": package.get("catalog", "flyology"),
                         "name": package["name"],
                         "version": release["version"],
                         "development": release["development"],
@@ -789,6 +820,7 @@ def dependency_index(packages: list[dict[str, Any]]) -> dict[str, list[dict[str,
                         "path": release["path"],
                         "requires": required.lower(),
                         "requirement": requirement,
+                        "condition": condition,
                     }
                 )
     return index
@@ -809,12 +841,35 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
     index = dependency_index(packages)
     for package in packages:
         for release in package["versions"]:
-            found: dict[tuple[str, str, str], dict[str, Any]] = {}
+            found: dict[tuple[str, str, str, str, str | None], dict[str, Any]] = {}
             for required, provided_version in provided_identities(
                 package["name"], release["version"], release["manifest"]
             ):
                 records = index.get(required, [])
                 if not records:
+                    continue
+                if release.get("external"):
+                    for record in records:
+                        if (
+                            record["catalog"]
+                            == package.get("catalog", "flyology")
+                            and record["name"] == package["name"]
+                        ):
+                            continue
+                        found.setdefault(
+                            (
+                                record["catalog"],
+                                record["name"],
+                                record["version"],
+                                required,
+                                record["condition"],
+                            ),
+                            {
+                                **record,
+                                "provided_version": None,
+                                "qualifies": None,
+                            },
+                        )
                     continue
                 try:
                     candidate = parse_semver(provided_version, relaxed=True)
@@ -824,7 +879,10 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
                         f"which is not a version Alire can parse: {error}"
                     ) from error
                 for record in records:
-                    if record["name"] == package["name"]:
+                    if (
+                        record["catalog"] == package.get("catalog", "flyology")
+                        and record["name"] == package["name"]
+                    ):
                         continue
                     try:
                         version_set = parse_version_set(record["requirement"])
@@ -835,7 +893,13 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
                             f"Alire can parse: {error}"
                         ) from error
                     found.setdefault(
-                        (record["name"], record["version"], required),
+                        (
+                            record["catalog"],
+                            record["name"],
+                            record["version"],
+                            required,
+                            record["condition"],
+                        ),
                         {
                             **record,
                             "provided_version": provided_version,
@@ -843,13 +907,13 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
                         },
                     )
             dependants: list[dict[str, Any]] = []
-            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
             for record in found.values():
-                grouped[record["name"]].append(record)
-            for name in sorted(grouped):
+                grouped[(record["catalog"], record["name"])].append(record)
+            for identity in sorted(grouped):
                 dependants.extend(
                     sorted(
-                        grouped[name],
+                        grouped[identity],
                         key=lambda record: version_key(record["version"]),
                         reverse=True,
                     )
@@ -857,7 +921,14 @@ def attach_dependants(packages: list[dict[str, Any]]) -> None:
             release["dependants"] = dependants
 
 
-def load_catalog(source: Path) -> dict[str, Any]:
+def load_catalog(
+    source: Path,
+    *,
+    catalog_name: str = "flyology",
+    canonical_url: str = CANONICAL_URL,
+    repository_url: str = REPOSITORY_URL,
+    attach_relationships: bool = True,
+) -> dict[str, Any]:
     index_path = source / "index.toml"
     with index_path.open("rb") as stream:
         index_metadata = json_value(tomllib.load(stream))
@@ -868,9 +939,13 @@ def load_catalog(source: Path) -> dict[str, Any]:
         with manifest_path.open("rb") as stream:
             manifest = json_value(tomllib.load(stream))
         try:
-            identity = manifest["name"], manifest["version"]
+            name = manifest["name"]
         except KeyError as error:
-            raise ValueError(f"{manifest_path} is missing {error.args[0]!r}") from error
+            raise ValueError(f"{manifest_path} is missing 'name'") from error
+        external = "version" not in manifest and bool(manifest.get("external"))
+        if "version" not in manifest and not external:
+            raise ValueError(f"{manifest_path} is missing 'version'")
+        identity = name, manifest.get("version", "system")
         if identity in seen:
             raise ValueError(f"duplicate manifest for {identity[0]} {identity[1]}")
         seen.add(identity)
@@ -878,18 +953,28 @@ def load_catalog(source: Path) -> dict[str, Any]:
             {
                 "version": identity[1],
                 "development": is_development_version(identity[1]),
-                "path": manifest_path.relative_to(ROOT).as_posix(),
+                "external": external,
+                "path": manifest_path.relative_to(source.parent).as_posix(),
                 "manifest": manifest,
             }
         )
 
     packages = []
     for name, releases in sorted(grouped.items()):
-        releases.sort(key=lambda release: version_key(release["version"]), reverse=True)
+        releases.sort(
+            key=lambda release: (
+                not release.get("external", False),
+                version_key(release["version"])
+                if not release.get("external")
+                else ((0,), False, ()),
+            ),
+            reverse=True,
+        )
         selected = select_release(releases)
         development_only = all(release["development"] for release in releases)
         packages.append(
             {
+                "catalog": catalog_name,
                 "name": name,
                 "description": selected["manifest"].get("description", "No description provided."),
                 "latest_version": releases[0]["version"],
@@ -898,12 +983,21 @@ def load_catalog(source: Path) -> dict[str, Any]:
                 "versions": releases,
             }
         )
-    attach_dependants(packages)
+    if attach_relationships:
+        attach_dependants(packages)
+        attach_resolved_dependencies(packages)
+
+    revision = git_output(source.parent, "rev-parse", "HEAD")
 
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at(),
-        "canonical_url": CANONICAL_URL,
+        "canonical_url": canonical_url,
+        "catalog": {
+            "name": catalog_name,
+            "repository_url": repository_url,
+            "revision": revision.strip() if revision else None,
+        },
         "index": index_metadata,
         "packages": packages,
     }
@@ -934,9 +1028,9 @@ def manifest_at(repository: Path, revision: str, path: str) -> dict[str, Any] | 
 
 def dependency_map(manifest: dict[str, Any]) -> dict[str, str]:
     dependencies: dict[str, str] = {}
-    for group in manifest.get("depends-on", []):
-        for name, constraint in group.items():
-            dependencies[name] = text(constraint)
+    for name, constraint, condition in dependency_declarations(manifest):
+        key = f"{name} ({condition})" if condition else name
+        dependencies[key] = constraint
     return dependencies
 
 
@@ -991,6 +1085,8 @@ def change_entry(
     path: str,
     before: dict[str, Any] | None,
     after: dict[str, Any],
+    *,
+    package_added: bool = False,
 ) -> dict[str, Any] | None:
     try:
         name = str(after["name"])
@@ -998,7 +1094,9 @@ def change_entry(
     except KeyError:
         return None
     development = is_development_version(version)
-    if status == "A":
+    if status == "A" and package_added:
+        kind = "package"
+    elif status == "A":
         kind = "published"
     elif development:
         kind = "development"
@@ -1087,7 +1185,24 @@ def load_change_history(
             if after is None:
                 continue
             before = manifest_at(repository, parent, path) if status == "M" else None
-            entry = change_entry(status, path, before, after)
+            package_tree = None
+            if status == "A":
+                package_tree = git_output(
+                    repository,
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    parent,
+                    "--",
+                    str(PurePosixPath(path).parent),
+                )
+            entry = change_entry(
+                status,
+                path,
+                before,
+                after,
+                package_added=status == "A" and not (package_tree or "").strip(),
+            )
             if entry is not None:
                 entries.append(entry)
         if not entries:
@@ -1116,75 +1231,164 @@ def text(value: Any) -> str:
 
 
 def field(label: str, value: Any, *, link: bool = False) -> str:
-    if value is None or value == [] or value == {}:
+    if value is None or value == "" or value == [] or value == {}:
         return ""
     escaped = html.escape(text(value))
-    rendered = f'<a href="{html.escape(str(value), quote=True)}">{escaped}</a>' if link else escaped
+    href = None
+    if link and isinstance(value, str):
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+            href = value
+        elif not parsed.scheme and not parsed.netloc and re.fullmatch(
+            r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s]*)?", value
+        ):
+            href = f"https://{value}"
+    rendered = (
+        f'<a href="{html.escape(href, quote=True)}">{escaped}</a>'
+        if href is not None
+        else escaped
+    )
     return f"<div><dt>{html.escape(label)}</dt><dd>{rendered}</dd></div>"
 
 
 def matching_dependency_release(
     packages: list[dict[str, Any]], required: str, requirement: str
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Return the highest indexed release satisfying one dependency."""
-    best: tuple[dict[str, Any], dict[str, Any], Semver] | None = None
+) -> tuple[dict[str, Any], dict[str, Any], str] | None:
+    """Return the highest matching release from the first qualifying index."""
+    catalog_order = list(dict.fromkeys(package.get("catalog", "flyology") for package in packages))
+    for catalog_name in catalog_order:
+        best: tuple[dict[str, Any], dict[str, Any], str, Semver] | None = None
+        external_target: tuple[dict[str, Any], dict[str, Any], str] | None = None
+        for package in packages:
+            if package.get("catalog", "flyology") != catalog_name:
+                continue
+            for release in package["versions"]:
+                for identity, provided_version in provided_identities(
+                    package["name"], release["version"], release["manifest"]
+                ):
+                    if identity != required.lower():
+                        continue
+                    if release.get("external"):
+                        external_target = package, release, "system"
+                        continue
+                    candidate = parse_semver(provided_version, relaxed=True)
+                    if not requirement_admits(requirement, provided_version):
+                        continue
+                    if best is None or semver_precedes(best[3], candidate):
+                        best = package, release, provided_version, candidate
+                        continue
+                    if semver_equivalent(best[3], candidate) and version_key(
+                        best[1]["version"]
+                    ) < version_key(release["version"]):
+                        best = package, release, provided_version, candidate
+        if best is not None:
+            return best[0], best[1], best[2]
+        if external_target is not None:
+            return external_target
+    return None
+
+
+def attach_resolved_dependencies(packages: list[dict[str, Any]]) -> None:
+    """Attach one ordered-index resolution record per declared dependency."""
     for package in packages:
         for release in package["versions"]:
-            for identity, provided_version in provided_identities(
-                package["name"], release["version"], release["manifest"]
+            resolved = []
+            for name, requirement, condition in dependency_declarations(
+                release["manifest"]
             ):
-                if identity != required.lower():
-                    continue
-                candidate = parse_semver(provided_version, relaxed=True)
-                if not requirement_admits(requirement, provided_version):
-                    continue
-                if best is None or semver_precedes(best[2], candidate):
-                    best = package, release, candidate
-                    continue
-                if semver_equivalent(best[2], candidate) and version_key(
-                    best[1]["version"]
-                ) < version_key(release["version"]):
-                    best = package, release, candidate
-    return (best[0], best[1]) if best is not None else None
+                target = matching_dependency_release(packages, name, requirement)
+                record: dict[str, Any] = {
+                    "name": name,
+                    "requirement": requirement,
+                    "condition": condition,
+                    "resolved": target is not None,
+                    "catalog": None,
+                    "package": None,
+                    "version": None,
+                    "provided_version": None,
+                }
+                if target is not None:
+                    target_package, target_release, provided_version = target
+                    record.update(
+                        {
+                            "catalog": target_package.get("catalog", "flyology"),
+                            "package": target_package["name"],
+                            "version": target_release["version"],
+                            "provided_version": provided_version,
+                        }
+                    )
+                resolved.append(record)
+            release["dependencies"] = resolved
+
+
+def relationship_href(
+    root_prefix: str,
+    current_catalog: str,
+    target_catalog: str,
+    package_name: str,
+    version: str,
+) -> str:
+    if current_catalog == target_catalog:
+        catalog_prefix = ""
+    elif current_catalog == "flyology" and target_catalog == "community":
+        catalog_prefix = "community/"
+    elif current_catalog == "community" and target_catalog == "flyology":
+        catalog_prefix = "../"
+    else:
+        raise ValueError(
+            f"cannot link from catalog {current_catalog!r} to {target_catalog!r}"
+        )
+    return (
+        f"{root_prefix}{catalog_prefix}crates/{segment(package_name)}/"
+        f"{segment(version)}/"
+    )
 
 
 def dependency_rows(
-    manifest: dict[str, Any],
+    release: dict[str, Any],
     *,
-    packages: list[dict[str, Any]] | None = None,
     root_prefix: str = "",
+    current_catalog: str = "flyology",
 ) -> str:
-    dependencies = manifest.get("depends-on", [])
+    dependencies = release.get("dependencies", [])
     if not dependencies:
         return '<p class="quiet">No package dependencies declared.</p>'
     rows = []
-    for group in dependencies:
-        for name, constraint in group.items():
-            constraint_text = text(constraint)
-            target = (
-                matching_dependency_release(packages, name, constraint_text)
-                if packages is not None
-                else None
+    for dependency in dependencies:
+        catalog_name = dependency["catalog"]
+        resolved_label = (
+            f'{"Community" if catalog_name == "community" else "Flyology"} · '
+            f'{dependency["version"]}'
+            if dependency["resolved"]
+            else "Unresolved"
+        )
+        condition = (
+            f'<small class="dependency-condition">{html.escape(dependency["condition"])}</small>'
+            if dependency["condition"]
+            else ""
+        )
+        content = (
+            '<span class="dependency-identity">'
+            f'<code>{html.escape(dependency["name"])}</code>'
+            f'<small>{html.escape(resolved_label)}</small></span>'
+            '<span class="dependency-requirement">'
+            f'{html.escape(dependency["requirement"])}{condition}</span>'
+        )
+        if not dependency["resolved"]:
+            row = f'<span class="dependency-row">{content}</span>'
+        else:
+            href = relationship_href(
+                root_prefix,
+                current_catalog,
+                catalog_name,
+                dependency["package"],
+                dependency["version"],
             )
-            content = (
-                f"<code>{html.escape(name)}</code>"
-                f"<span>{html.escape(constraint_text)}</span>"
+            row = (
+                f'<a class="dependency-row dependency-link" '
+                f'href="{html.escape(href, quote=True)}">{content}</a>'
             )
-            if target is None:
-                row = f'<span class="dependency-row">{content}</span>'
-            else:
-                target_package, target_release = target
-                href = (
-                    f'{root_prefix}crates/{segment(target_package["name"])}/'
-                    f'{segment(target_release["version"])}/'
-                )
-                row = (
-                    f'<a class="dependency-row dependency-link" '
-                    f'href="{html.escape(href, quote=True)}">{content}</a>'
-                )
-            rows.append(
-                f"<li>{row}</li>"
-            )
+        rows.append(f"<li>{row}</li>")
     return '<ul class="dependency-list">' + "".join(rows) + "</ul>"
 
 
@@ -1192,21 +1396,30 @@ def counted(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def dependant_verdict(qualifies: bool) -> tuple[str, str]:
+def dependant_verdict(qualifies: bool | None) -> tuple[str, str]:
     """The CSS state and the label describing one dependant's requirement."""
+    if qualifies is None:
+        return "system", "System"
     return ("qualifies", "Qualifies") if qualifies else ("excluded", "Excluded")
 
 
-def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str) -> str:
+def dependant_rows(
+    package_name: str,
+    release: dict[str, Any],
+    root_prefix: str,
+    *,
+    current_catalog: str = "flyology",
+) -> str:
     dependants = release["dependants"]
     if not dependants:
         return '<p class="quiet">No indexed release depends on this version.</p>'
     identities: list[str] = []
     for record in dependants:
-        identity = f'{record["requires"]} {record["provided_version"]}'
+        provided = record["provided_version"] or "system-detected"
+        identity = f'{record["requires"]} {provided}'
         if identity not in identities:
             identities.append(identity)
-    qualifying = sum(record["qualifies"] for record in dependants)
+    qualifying = sum(record["qualifies"] is True for record in dependants)
     tested = ", ".join(f"<code>{html.escape(identity)}</code>" for identity in identities)
     summary = (
         f"Resolved against {tested} — {qualifying} of "
@@ -1214,7 +1427,9 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
         f'{"qualifies" if qualifying == 1 else "qualify"}.'
     )
     groups = []
-    for name, record_group in groupby(dependants, key=lambda record: record["name"]):
+    for (catalog_name, name), record_group in groupby(
+        dependants, key=lambda record: (record["catalog"], record["name"])
+    ):
         records = list(record_group)
         rows = []
         for record in records:
@@ -1228,7 +1443,15 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
             requirement = record["requirement"]
             if record["requires"] != package_name.lower():
                 requirement = f'{record["requires"]} {requirement}'
-            href = f'{root_prefix}crates/{segment(record["name"])}/{segment(record["version"])}/'
+            if record["condition"]:
+                requirement = f'{requirement} · {record["condition"]}'
+            href = relationship_href(
+                root_prefix,
+                current_catalog,
+                record["catalog"],
+                record["name"],
+                record["version"],
+            )
             rows.append(
                 f'<li class="dependant-release dependant-release-{state}">'
                 f'<a href="{html.escape(href, quote=True)}">{version}</a>'
@@ -1239,12 +1462,18 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
         top_match = next(
             (record for record in records if record["qualifies"]), records[0]
         )
-        top_release_href = (
-            f'{root_prefix}crates/{segment(name)}/{segment(top_match["version"])}/'
+        top_release_href = relationship_href(
+            root_prefix,
+            current_catalog,
+            top_match["catalog"],
+            name,
+            top_match["version"],
         )
+        catalog_label = "Community" if catalog_name == "community" else "Flyology"
         groups.append(
             '<li class="dependant-group">'
             f'<a class="dependant-name" href="{html.escape(top_release_href, quote=True)}">{html.escape(name)}</a>'
+            f'<span class="dependant-catalog">{catalog_label}</span>'
             f'<ul class="dependant-releases">{"".join(rows)}</ul>'
             "</li>"
         )
@@ -1265,6 +1494,8 @@ def origin_summary(manifest: dict[str, Any]) -> str:
 
 
 def package_kind(manifest: dict[str, Any]) -> str:
+    if manifest.get("external"):
+        return "external"
     return "toolchain" if manifest.get("provides") or manifest.get("auto-gpr-with") is False else "source"
 
 
@@ -1298,7 +1529,7 @@ def render_release_detail(
     heading_level: int,
     raw_expanded: bool,
     root_prefix: str,
-    packages: list[dict[str, Any]] | None = None,
+    current_catalog: str = "flyology",
     include_relationships: bool = True,
     include_raw_manifest: bool = True,
 ) -> str:
@@ -1310,11 +1541,11 @@ def render_release_detail(
         relationships = f"""
         <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
           <{child_heading} id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</{child_heading}>
-          {dependency_rows(manifest, packages=packages, root_prefix=root_prefix)}
+          {dependency_rows(release, root_prefix=root_prefix, current_catalog=current_catalog)}
         </section>
         <section class="detail-section" aria-labelledby="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">
           <{child_heading} id="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">Dependants</{child_heading}>
-          {dependant_rows(package_name, release, root_prefix)}
+          {dependant_rows(package_name, release, root_prefix, current_catalog=current_catalog)}
         </section>"""
     raw_manifest = ""
     if include_raw_manifest:
@@ -1388,7 +1619,7 @@ def render_detail_rail(
     context: str,
     root_prefix: str,
     manifest_href: str,
-    packages: list[dict[str, Any]] | None = None,
+    current_catalog: str = "flyology",
 ) -> str:
     name = package["name"]
     version = release["version"]
@@ -1398,18 +1629,18 @@ def render_detail_rail(
         {render_version_links(package, context=context, current_version=version, exclude_current=False, title='Indexed versions')}
         <section class="detail-rail-section" aria-labelledby="rail-deps-{identity}">
           <h3 id="rail-deps-{identity}">Dependencies</h3>
-          {dependency_rows(release["manifest"], packages=packages, root_prefix=root_prefix)}
+          {dependency_rows(release, root_prefix=root_prefix, current_catalog=current_catalog)}
         </section>
         <section class="detail-rail-section" aria-labelledby="rail-dependants-{identity}">
           <h3 id="rail-dependants-{identity}">Dependants</h3>
-          {dependant_rows(name, release, root_prefix)}
+          {dependant_rows(name, release, root_prefix, current_catalog=current_catalog)}
         </section>
         <a class="manifest-json-link" href="{html.escape(manifest_href, quote=True)}" download>Complete manifest as JSON</a>
       </aside>"""
 
 
 def render_package(
-    package: dict[str, Any], packages: list[dict[str, Any]] | None = None
+    package: dict[str, Any], *, current_catalog: str = "flyology"
 ) -> str:
     selected = release_for(package, package["selected_version"])
     manifest = selected["manifest"]
@@ -1443,8 +1674,15 @@ def render_package(
           </span>
         </div>
         <div class="package-release-layout">
-          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False, root_prefix='', packages=packages)}
-          {render_version_links(package, context='home', current_version=selected['version'], exclude_current=True, title='Other versions')}
+          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False, root_prefix='', current_catalog=current_catalog, include_relationships=False, include_raw_manifest=False)}
+          {render_detail_rail(
+              package,
+              selected,
+              context='home',
+              root_prefix='',
+              manifest_href=f'crates/{name}/{version}/manifest.json',
+              current_catalog=current_catalog,
+          )}
         </div>
       </div>
     </details>"""
@@ -1452,6 +1690,7 @@ def render_package(
 
 def change_kind_label(kind: str) -> str:
     return {
+        "package": "New crate",
         "published": "New version",
         "development": "Development update",
         "manifest": "Manifest update",
@@ -1495,7 +1734,14 @@ def render_dependency_changes(changes: list[dict[str, str]]) -> str:
     return f'<div class="change-dependencies"><h4>Dependency changes</h4><ul>{"".join(items)}</ul></div>'
 
 
-def render_change_entry(entry: dict[str, Any], *, root_prefix: str, detailed: bool) -> str:
+def render_change_entry(
+    entry: dict[str, Any],
+    *,
+    root_prefix: str,
+    detailed: bool,
+    repository_url: str = REPOSITORY_URL,
+    repository_revision: str = "main",
+) -> str:
     name = segment(entry["name"])
     version = segment(entry["version"])
     label = change_kind_label(entry["kind"])
@@ -1509,6 +1755,8 @@ def render_change_entry(entry: dict[str, Any], *, root_prefix: str, detailed: bo
             f'<span aria-hidden="true">→</span><span class="visually-hidden"> updated to </span>'
             f'{source_link(entry["source_url"], revision, revision[:8])}'
         )
+    elif entry["kind"] == "package":
+        concise = "Crate added to the index"
     elif entry["kind"] == "published":
         concise = "Version added to the index"
     else:
@@ -1516,14 +1764,14 @@ def render_change_entry(entry: dict[str, Any], *, root_prefix: str, detailed: bo
     details = ""
     if detailed:
         facts = []
-        if entry["kind"] == "published":
+        if entry["kind"] in ("package", "published"):
             facts.append(f'<div><dt>Origin</dt><dd>{html.escape(origin_summary(entry["manifest"]))}</dd></div>')
         elif before_revision or revision:
             facts.append(f'<div><dt>Source revision</dt><dd class="change-revisions">{concise}</dd></div>')
         if fields:
             facts.append(f'<div><dt>Manifest fields</dt><dd>{html.escape(fields)}</dd></div>')
         facts.append(
-            f'<div><dt>Manifest</dt><dd><a href="{REPOSITORY_URL}/blob/main/{html.escape(entry["path"], quote=True)}"><code>{html.escape(entry["path"])}</code></a></dd></div>'
+            f'<div><dt>Manifest</dt><dd><a href="{repository_url}/blob/{html.escape(repository_revision, quote=True)}/{html.escape(entry["path"], quote=True)}"><code>{html.escape(entry["path"])}</code></a></dd></div>'
         )
         comparison = ""
         before_web = source_web_url(entry["before_source_url"])
@@ -1547,17 +1795,23 @@ def render_change_entry(entry: dict[str, Any], *, root_prefix: str, detailed: bo
       </article>"""
 
 
-def render_change_preview(history: list[dict[str, Any]]) -> str:
+def render_change_preview(
+    catalog: dict[str, Any], history: list[dict[str, Any]]
+) -> str:
     all_entries = []
     for group in history:
         for entry in group["entries"]:
             all_entries.append((group, entry))
     recent = all_entries[:HOME_CHANGE_LIMIT]
-    for required_kind in ("published", "development"):
-        if any(entry["kind"] == required_kind for _group, entry in recent):
+    for required_kinds in (("package", "published"), ("development", "manifest")):
+        if any(entry["kind"] in required_kinds for _group, entry in recent):
             continue
         replacement = next(
-            (item for item in all_entries[HOME_CHANGE_LIMIT:] if item[1]["kind"] == required_kind),
+            (
+                item
+                for item in all_entries[HOME_CHANGE_LIMIT:]
+                if item[1]["kind"] in required_kinds
+            ),
             None,
         )
         if replacement and recent:
@@ -1565,37 +1819,54 @@ def render_change_preview(history: list[dict[str, Any]]) -> str:
     if not recent:
         return ""
     rows = []
+    repository_url = catalog["catalog"]["repository_url"]
+    repository_revision = catalog["catalog"].get("revision") or "main"
     for group, entry in recent:
         rows.append(
             f'<li><time datetime="{html.escape(group["timestamp"], quote=True)}">{html.escape(change_date_label(group["timestamp"]))}</time>'
-            f'{render_change_entry(entry, root_prefix="", detailed=False)}</li>'
+            f'{render_change_entry(entry, root_prefix="", detailed=False, repository_url=repository_url, repository_revision=repository_revision)}</li>'
         )
     return f"""
       <section class="changes-preview page-shell" aria-labelledby="changes-preview-title">
         <div class="changes-heading">
           <div><p class="eyebrow">Index activity</p><h2 id="changes-preview-title">Recent changes.</h2></div>
-          <p>Newly published versions and advances to development source pins.</p>
+          <p>Crates and versions recently added or updated in this index.</p>
         </div>
         <ol class="change-preview-list">{"".join(rows)}</ol>
         <a class="text-link" href="changes/">View the detailed change history <span aria-hidden="true">→</span></a>
       </section>"""
 
 
-def render_site_header(root_prefix: str, current: str) -> str:
+def other_catalog_href(root_prefix: str, catalog_name: str) -> str:
+    return (
+        f"{root_prefix}community/"
+        if catalog_name == "flyology"
+        else f"{root_prefix}../"
+    )
+
+
+def render_site_header(
+    root_prefix: str, current: str, catalog: dict[str, Any]
+) -> str:
+    catalog_name = catalog["catalog"]["name"]
+    repository_url = catalog["catalog"]["repository_url"]
+    brand_label = "Community Crates" if catalog_name == "community" else "Flyology Crates"
+    other_label = "Flyology index" if catalog_name == "community" else "Community index"
     package_current = ' aria-current="page"' if current == "packages" else ""
     changes_current = ' aria-current="page"' if current == "changes" else ""
     return f"""
     <header class="site-header">
       <nav class="site-nav" aria-label="Primary navigation">
-        <a class="brand" href="{root_prefix}" aria-label="Flyology Crate Index home">
+        <a class="brand" href="{root_prefix}" aria-label="{brand_label} home">
           <img class="brand-mark" src="{root_prefix}flyology-mark.svg" alt="">
-          <span>Flyology Crates</span>
+          <span>{brand_label}</span>
         </a>
         <ul class="nav-links" data-nav-links>
           <li><a href="{root_prefix}#catalog"{package_current}>Packages</a></li>
           <li><a href="{root_prefix}changes/"{changes_current}>Changes</a></li>
+          <li><a class="catalog-switch" href="{other_catalog_href(root_prefix, catalog_name)}"><span>{other_label}</span><span aria-hidden="true">↗</span></a></li>
           <li><a href="{root_prefix}crates.json" download>JSON</a></li>
-          <li><a href="https://github.com/flyology-ada/alire-index">GitHub</a></li>
+          <li><a href="{repository_url}">GitHub</a></li>
         </ul>
         <div class="nav-tools">
           <button class="icon-button" type="button" data-theme-toggle>
@@ -1613,20 +1884,47 @@ def render_site_header(root_prefix: str, current: str) -> str:
 
 def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     packages = catalog["packages"]
+    catalog_name = catalog["catalog"]["name"]
+    is_community = catalog_name == "community"
+    repository_url = catalog["catalog"]["repository_url"]
     manifest_count = sum(len(package["versions"]) for package in packages)
     source_count = sum(package_kind(package["versions"][0]["manifest"]) == "source" for package in packages)
     package_html = "".join(
-        render_package(package, packages) for package in packages
+        render_package(package, current_catalog=catalog_name) for package in packages
     )
+    page_description = (
+        "A daily generated shadow of packages in the Alire community index."
+        if is_community
+        else "Packages and compiler builds published in the Flyology Alire index."
+    )
+    page_title = "Alire Community Shadow" if is_community else "Flyology Crate Index"
+    eyebrow = "Alire community mirror" if is_community else "Flyology packages"
+    heading = "Alire community index." if is_community else "Flyology Alire index."
+    lede = (
+        "A daily shadow of the Alire community catalog, rendered with the same package, version, relationship, and JSON views as the Flyology index."
+        if is_community
+        else "Packages and compiler builds maintained by Flyology. This page and its JSON files are generated directly from the index manifests."
+    )
+    install_command = (
+        "alr index --reset-community"
+        if is_community
+        else """alr index \\
+<span class="install-option">  --add=</span>git+https://github.com/flyology-ada/alire-index.git \\
+<span class="install-option">  --name=</span>flyology \\
+<span class="install-option">  --before=</span>community"""
+    )
+    install_label = "Restore community index" if is_community else "Configure Alire"
+    repository_label = "Alire community index" if is_community else "Flyology Alire index"
+    other_label = "Flyology index" if is_community else "Community shadow"
     return f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Packages and compiler builds published in the Flyology Alire index.">
+    <meta name="description" content="{html.escape(page_description, quote=True)}">
     <meta name="theme-color" content="#17213d">
-    <title>Flyology Crate Index</title>
-    <link rel="canonical" href="{CANONICAL_URL}">
+    <title>{page_title}</title>
+    <link rel="canonical" href="{catalog['canonical_url']}">
     <link rel="icon" href="flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="assets/styles/site.css">
     <link rel="stylesheet" href="assets/styles/index.css?v={INDEX_CSS_VERSION}">
@@ -1636,24 +1934,21 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
   </head>
   <body>
     <a class="skip-link" href="#catalog">Skip to crate catalog</a>
-    {render_site_header('./', 'packages')}
+    {render_site_header('./', 'packages', catalog)}
     <main>
       <section class="catalog-hero page-shell" aria-labelledby="page-title">
         <div>
-          <p class="eyebrow">Flyology packages</p>
-          <h1 id="page-title">Flyology Alire index.</h1>
-          <p class="hero-lede">Packages and compiler builds maintained by Flyology. This page and its JSON files are generated directly from the index manifests.</p>
+          <p class="eyebrow">{eyebrow}</p>
+          <h1 id="page-title">{heading}</h1>
+          <p class="hero-lede">{lede}</p>
           <div class="actions">
             <a class="button button-primary" href="#catalog">View {len(packages)} packages</a>
             <a class="button button-secondary" href="crates.json" download>Download JSON</a>
           </div>
         </div>
         <div class="install-panel">
-          <div class="install-heading"><span>Configure Alire</span><span>shell</span></div>
-          <pre><code id="install-command">alr index \\
-<span class="install-option">  --add=</span>git+https://github.com/flyology-ada/alire-index.git \\
-<span class="install-option">  --name=</span>flyology \\
-<span class="install-option">  --before=</span>community</code></pre>
+          <div class="install-heading"><span>{install_label}</span><span>shell</span></div>
+          <pre><code id="install-command">{install_command}</code></pre>
           <button type="button" data-copy-install>Copy command</button>
         </div>
       </section>
@@ -1665,7 +1960,7 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
           <p><strong>v{html.escape(str(catalog['index'].get('version', 'unknown')))}</strong> index format</p>
         </div>
       </div>
-      {render_change_preview(history)}
+      {render_change_preview(catalog, history)}
       <section class="catalog page-shell" id="catalog" aria-labelledby="catalog-title" data-catalog>
         <div class="catalog-heading">
           <div>
@@ -1685,6 +1980,7 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
               <option value="all">All packages</option>
               <option value="source">Source crates</option>
               <option value="toolchain">Toolchains</option>
+              <option value="external">System externals</option>
             </select>
           </label>
           <button class="expand-button" type="button" data-expand-all>Expand visible</button>
@@ -1699,8 +1995,8 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     </main>
     <footer class="site-footer">
       <div class="footer-inner">
-        <p>Generated from the <a href="https://github.com/flyology-ada/alire-index">Flyology Alire index</a>.</p>
-        <div class="footer-links"><a href="crates.json">Aggregate JSON</a><a href="README.txt">JSON schema notes</a></div>
+        <p>Generated from the <a href="{repository_url}">{repository_label}</a>.</p>
+        <div class="footer-links"><a href="{other_catalog_href('./', catalog_name)}">{other_label}</a><a href="crates.json">Aggregate JSON</a><a href="README.txt">JSON schema notes</a></div>
       </div>
     </footer>
   </body>
@@ -1708,14 +2004,24 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
 """
 
 
-def render_detail_header(root_prefix: str) -> str:
-    return render_site_header(root_prefix, "packages")
+def render_detail_header(root_prefix: str, catalog: dict[str, Any]) -> str:
+    return render_site_header(root_prefix, "packages", catalog)
 
 
-def render_changes_page(history: list[dict[str, Any]]) -> str:
+def render_changes_page(
+    catalog: dict[str, Any], history: list[dict[str, Any]]
+) -> str:
+    catalog_name = catalog["catalog"]["name"]
+    repository_url = catalog["catalog"]["repository_url"]
+    repository_revision = catalog["catalog"].get("revision") or "main"
+    catalog_label = (
+        "Alire community index" if catalog_name == "community" else "Flyology Alire index"
+    )
     change_count = sum(len(group["entries"]) for group in history)
     published_count = sum(
-        entry["kind"] == "published" for group in history for entry in group["entries"]
+        entry["kind"] in ("package", "published")
+        for group in history
+        for entry in group["entries"]
     )
     development_count = sum(
         entry["kind"] == "development" for group in history for entry in group["entries"]
@@ -1723,7 +2029,13 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
     groups = []
     for group in history:
         entries = "".join(
-            render_change_entry(entry, root_prefix="../", detailed=True)
+            render_change_entry(
+                entry,
+                root_prefix="../",
+                detailed=True,
+                repository_url=repository_url,
+                repository_revision=repository_revision,
+            )
             for entry in group["entries"]
         )
         groups.append(
@@ -1733,7 +2045,7 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
             <time datetime="{html.escape(group['timestamp'], quote=True)}">{html.escape(change_date_label(group['timestamp']))}</time>
             <div>
               <h2>{html.escape(group['summary'])}</h2>
-              <a href="{REPOSITORY_URL}/commit/{html.escape(group['commit'], quote=True)}"><code>{html.escape(group['commit'][:8])}</code> on GitHub</a>
+              <a href="{repository_url}/commit/{html.escape(group['commit'], quote=True)}"><code>{html.escape(group['commit'][:8])}</code> on GitHub</a>
             </div>
           </header>
           <div class="change-group-entries">{entries}</div>
@@ -1749,10 +2061,10 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Newly published versions and development manifest updates in the Flyology Alire index.">
+    <meta name="description" content="Newly published versions and manifest updates in the {catalog_label}.">
     <meta name="theme-color" content="#17213d">
-    <title>Index changes · Flyology Crates</title>
-    <link rel="canonical" href="{CANONICAL_URL}changes/">
+    <title>Index changes · {catalog_label}</title>
+    <link rel="canonical" href="{catalog['canonical_url']}changes/">
     <link rel="icon" href="../flyology-logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="../assets/styles/site.css">
     <link rel="stylesheet" href="../assets/styles/index.css?v={INDEX_CSS_VERSION}">
@@ -1761,13 +2073,13 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to change history</a>
-    {render_site_header('../', 'changes')}
+    {render_site_header('../', 'changes', catalog)}
     <main class="changes-page page-shell" id="main">
       <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="../">Index</a><span aria-hidden="true">/</span><span aria-current="page">Changes</span></nav>
       <header class="changes-hero">
         <p class="eyebrow">Index activity</p>
         <h1>Index changes.</h1>
-        <p>New versions and development source advances, derived from the repository history for packages currently in the index.</p>
+        <p>Crates and versions added or updated, derived from the repository history for packages currently in the index.</p>
       </header>
       <div class="change-stats" aria-label="Change history summary">
         <p><strong>{change_count}</strong> manifest changes</p>
@@ -1778,8 +2090,8 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
     </main>
     <footer class="site-footer">
       <div class="footer-inner">
-        <p>Generated from the <a href="{REPOSITORY_URL}">Flyology Alire index</a>.</p>
-        <div class="footer-links"><a href="../">Package index</a><a href="../crates.json">Aggregate JSON</a></div>
+        <p>Generated from the <a href="{repository_url}">{catalog_label}</a>.</p>
+        <div class="footer-links"><a href="{other_catalog_href('../', catalog_name)}">{"Flyology index" if catalog_name == "community" else "Community shadow"}</a><a href="../">Package index</a><a href="../crates.json">Aggregate JSON</a></div>
       </div>
     </footer>
   </body>
@@ -1787,12 +2099,17 @@ def render_changes_page(history: list[dict[str, Any]]) -> str:
 """
 
 
-def render_detail_footer(root_prefix: str, package: dict[str, Any]) -> str:
+def render_detail_footer(
+    root_prefix: str, package: dict[str, Any], catalog: dict[str, Any]
+) -> str:
+    catalog_name = catalog["catalog"]["name"]
+    repository_url = catalog["catalog"]["repository_url"]
+    catalog_label = "Alire community index" if catalog_name == "community" else "Flyology Alire index"
     return f"""
     <footer class="site-footer">
       <div class="footer-inner">
-        <p>Generated from the <a href="https://github.com/flyology-ada/alire-index">Flyology Alire index</a>.</p>
-        <div class="footer-links"><a href="{root_prefix}">Package index</a><a href="{root_prefix}crates/{segment(package['name'])}.json">Package JSON</a></div>
+        <p>Generated from the <a href="{repository_url}">{catalog_label}</a>.</p>
+        <div class="footer-links"><a href="{other_catalog_href(root_prefix, catalog_name)}">{"Flyology index" if catalog_name == "community" else "Community shadow"}</a><a href="{root_prefix}">Package index</a><a href="{root_prefix}crates/{segment(package['name'])}.json">Package JSON</a></div>
       </div>
     </footer>"""
 
@@ -1895,21 +2212,23 @@ def render_source_documents(
 def render_detail_page(
     package: dict[str, Any],
     release: dict[str, Any],
+    catalog: dict[str, Any],
     *,
     page_kind: str,
     documents: ReleaseDocuments = EMPTY_RELEASE_DOCUMENTS,
-    packages: list[dict[str, Any]] | None = None,
 ) -> str:
     is_version_page = page_kind == "version"
     root_prefix = "../../../" if is_version_page else "../../"
     name = package["name"]
     version = release["version"]
+    catalog_name = catalog["catalog"]["name"]
+    catalog_label = "Community Crates" if catalog_name == "community" else "Flyology Crates"
     encoded_name = segment(name)
     encoded_version = segment(version)
     canonical = (
-        f"{CANONICAL_URL}crates/{encoded_name}/{encoded_version}/"
+        f"{catalog['canonical_url']}crates/{encoded_name}/{encoded_version}/"
         if is_version_page
-        else f"{CANONICAL_URL}crates/{encoded_name}/"
+        else f"{catalog['canonical_url']}crates/{encoded_name}/"
     )
     description = release["manifest"].get("description", "No description provided.")
     kind = package_kind(release["manifest"])
@@ -1932,7 +2251,7 @@ def render_detail_page(
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="{html.escape(description, quote=True)}">
     <meta name="theme-color" content="#17213d">
-    <title>{html.escape(name)} {html.escape(version)} · Flyology Crates</title>
+    <title>{html.escape(name)} {html.escape(version)} · {catalog_label}</title>
     <link rel="canonical" href="{canonical}">
     <link rel="alternate" type="application/json" href="{json_href}">
     <link rel="icon" href="{root_prefix}flyology-logo.svg" type="image/svg+xml">
@@ -1943,7 +2262,7 @@ def render_detail_page(
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to crate details</a>
-    {render_detail_header(root_prefix)}
+    {render_detail_header(root_prefix, catalog)}
     <main class="crate-page page-shell" id="main">
       <nav class="breadcrumbs" aria-label="Breadcrumb">{breadcrumbs}</nav>
       <header class="crate-hero">
@@ -1957,12 +2276,12 @@ def render_detail_page(
         </div>
       </header>
       <div class="detail-page-layout">
-        {render_release_detail(name, release, heading_level=2, raw_expanded=False, root_prefix=root_prefix, packages=packages, include_relationships=False, include_raw_manifest=False)}
-        {render_detail_rail(package, release, context=version_context, root_prefix=root_prefix, manifest_href=manifest_href, packages=packages)}
+        {render_release_detail(name, release, heading_level=2, raw_expanded=False, root_prefix=root_prefix, current_catalog=catalog_name, include_relationships=False, include_raw_manifest=False)}
+        {render_detail_rail(package, release, context=version_context, root_prefix=root_prefix, manifest_href=manifest_href, current_catalog=catalog_name)}
       </div>
       {render_source_documents(documents, package_name=name, version=version)}
     </main>
-    {render_detail_footer(root_prefix, package)}
+    {render_detail_footer(root_prefix, package, catalog)}
   </body>
 </html>
 """
@@ -1998,7 +2317,7 @@ INDEX_CSS = r"""
 .change-entry-heading h3 a:hover { color: var(--violet-deep); }
 .change-entry-heading h3 code { margin-left: .25rem; color: var(--violet-deep); font-size: .7rem; font-weight: 400; }
 .change-kind { display: inline-flex; align-items: center; padding: .17rem .46rem; border: 1px solid currentColor; border-radius: 999px; font-size: .6rem; font-weight: 650; letter-spacing: .025em; white-space: nowrap; }
-.change-entry-published .change-kind { background: color-mix(in oklch, var(--teal) 10%, var(--paper)); color: var(--teal-deep); }
+.change-entry-package .change-kind, .change-entry-published .change-kind { background: color-mix(in oklch, var(--teal) 10%, var(--paper)); color: var(--teal-deep); }
 .change-entry-development .change-kind { background: color-mix(in oklch, var(--violet) 8%, var(--paper)); color: var(--violet-deep); }
 .change-entry-manifest .change-kind { background: var(--surface); color: var(--ink-soft); }
 .change-entry-summary { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; color: var(--ink-soft); font-size: .76rem; }
@@ -2017,6 +2336,9 @@ INDEX_CSS = r"""
 .expand-button:hover { background: var(--surface-strong); }
 .result-count { margin: 1rem 0; color: var(--ink-soft); font: .74rem var(--font-mono); }
 .package-list { border-top: 1px solid var(--line); }
+.nav-links a.catalog-switch { display: inline-flex; align-items: center; padding: .38rem .68rem; border: 1px solid var(--line); border-radius: 999px; gap: .45rem; background: var(--surface); color: var(--ink); line-height: 1; text-decoration: none; }
+.nav-links a.catalog-switch:hover { border-color: var(--violet); background: var(--surface-strong); color: var(--violet-deep); }
+.catalog-switch span:last-child { color: var(--violet-deep); font-size: .7em; }
 .package { border-bottom: 1px solid var(--line); }
 .package[hidden] { display: none; }
 .package-summary { display: grid; grid-template-columns: minmax(13rem, .72fr) minmax(16rem, 1.2fr) auto; align-items: center; min-height: 7.2rem; padding: 1.2rem .25rem; gap: 1.4rem; cursor: pointer; list-style: none; transition: background-color 180ms var(--ease-out), padding 180ms var(--ease-out); }
@@ -2052,6 +2374,11 @@ INDEX_CSS = r"""
 .dependency-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
 .dependency-list li { background: var(--surface); font-size: .76rem; }
 .dependency-row { display: grid; grid-template-columns: minmax(10rem, .3fr) minmax(0, 1fr); padding: .55rem .7rem; gap: 1rem; }
+.dependency-identity { display: grid; min-width: 0; gap: .1rem; }
+.dependency-identity code { color: var(--ink); overflow-wrap: anywhere; }
+.dependency-identity small, .dependency-condition { color: var(--ink-soft); font: 600 .58rem var(--font-sans); letter-spacing: .025em; }
+.dependency-requirement { display: grid; align-content: center; min-width: 0; overflow-wrap: anywhere; }
+.dependency-condition { display: block; margin-top: .15rem; }
 .dependency-link { color: var(--ink); text-decoration: none; }
 .dependency-link:hover { background: var(--surface-strong); }
 .dependency-link:hover code { color: var(--violet-deep); }
@@ -2060,6 +2387,7 @@ INDEX_CSS = r"""
 .dependant-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
 .dependant-group { padding: .6rem .7rem; background: var(--surface); }
 .dependant-name { display: inline-block; font-size: .76rem; font-weight: 620; }
+.dependant-catalog { margin-left: .45rem; color: var(--ink-soft); font-size: .58rem; font-weight: 600; letter-spacing: .025em; }
 .dependant-releases { display: grid; margin: .45rem 0 0; padding: 0; gap: .3rem; list-style: none; }
 .dependant-release { display: grid; grid-template-columns: minmax(7rem, .28fr) minmax(0, 1fr) 5.4rem; align-items: baseline; gap: .9rem; font-size: .74rem; }
 .dependant-release > a { color: var(--ink); font-family: var(--font-mono); overflow-wrap: anywhere; text-decoration: none; }
@@ -2067,6 +2395,7 @@ INDEX_CSS = r"""
 .dependant-release code { color: var(--ink-soft); font-size: .7rem; overflow-wrap: anywhere; }
 .dependant-verdict { justify-self: end; color: var(--ink-soft); font: 620 .62rem var(--font-sans); letter-spacing: .035em; white-space: nowrap; }
 .dependant-release-qualifies .dependant-verdict { color: var(--teal-deep); }
+.dependant-release-system .dependant-verdict { color: var(--violet-deep); }
 .raw-manifest { margin-top: 1.5rem; }
 .raw-manifest > summary { display: inline-flex; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); font-size: .76rem; font-weight: 600; cursor: pointer; list-style: none; }
 .raw-manifest pre { max-height: 32rem; margin: .7rem 0 0; padding: 1rem; overflow: auto; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); font-size: .72rem; line-height: 1.65; }
@@ -2301,12 +2630,13 @@ INDEX_JS = r"""
 """
 
 
-README_TEXT = """Flyology crate index JSON
-==========================
+README_TEXT = """Alire crate index JSON
+======================
 
-crates.json is the aggregate catalog. Its schema_version is currently 3.
+crates.json is the aggregate catalog. Its schema_version is currently 4.
 Each crates/<name>.json file contains the same package object plus the catalog
-schema_version, generated_at, canonical_url, and index metadata.
+schema_version, generated_at, canonical_url, catalog provenance, and index
+metadata. The catalog revision is the exact Git commit rendered by this build.
 
 Each package records latest_version, selected_version, and development_only.
 selected_version is the newest non-dev release when one exists; otherwise it
@@ -2319,6 +2649,13 @@ and time values being represented as ISO 8601 strings.
 The same manifest object is also available directly at
 crates/<name>/<version>/manifest.json.
 
+Every version has a dependencies array resolving each declared version set
+against the ordered Flyology and community catalogs. It records conditional
+branches, the catalog and package supplying the dependency, the selected
+release, and the version exposed through provides. A system external resolves
+to the synthetic system release because its concrete version is detected on
+the user's host rather than known at site-build time.
+
 Every version also has a dependants array listing the indexed releases that
 depend on it, grouped by crate name and ordered newest version first. Each
 entry records the dependant's name, version, development flag, path, and
@@ -2327,10 +2664,11 @@ crate the dependant asks for and provided_version is the version this release
 carries under that name, so a toolchain declaring provides = ["gnat=16.2.0"] is
 resolved as gnat 16.2.0. The requirement field is the declared version set and
 qualifies reports whether provided_version satisfies it, following Alire's
-semantic_versioning rules. Dependants outside this index are not listed.
+semantic_versioning rules. A null qualifies value identifies a system external
+whose installed version cannot be known by the static catalog.
 
 A version or version set the generator cannot parse fails site generation
-rather than producing a partial answer, so qualifies is always a boolean.
+rather than producing a partial answer.
 
 Browser clients on other origins can fetch these files because GitHub Pages
 serves static assets with Access-Control-Allow-Origin: *.
@@ -2338,6 +2676,19 @@ serves static assets with Access-Control-Allow-Origin: *.
 
 
 def render_llms(catalog: dict[str, Any]) -> str:
+    canonical_url = catalog["canonical_url"]
+    catalog_name = catalog["catalog"]["name"]
+    repository_url = catalog["catalog"]["repository_url"]
+    title = (
+        "Alire Community Index Shadow"
+        if catalog_name == "community"
+        else "Flyology Crate Index"
+    )
+    summary = (
+        "A daily generated human- and machine-readable shadow of the Alire community index."
+        if catalog_name == "community"
+        else "A human- and machine-readable catalog of Ada packages and GNAT compiler builds maintained by Flyology and published through a custom Alire index."
+    )
     package_links = []
     for package in catalog["packages"]:
         name = package["name"]
@@ -2346,22 +2697,22 @@ def render_llms(catalog: dict[str, Any]) -> str:
             description += "."
         status = " Development-only." if package["development_only"] else ""
         package_links.append(
-            f"- [{name}]({CANONICAL_URL}crates/{segment(name)}.json): "
+            f"- [{name}]({canonical_url}crates/{segment(name)}.json): "
             f"{description} Selected version: {package['selected_version']}.{status}"
         )
 
-    return f"""# Flyology Crate Index
+    return f"""# {title}
 
-> A human- and machine-readable catalog of Ada packages and GNAT compiler builds maintained by Flyology and published through a custom Alire index.
+> {summary}
 
-This index is separate from the Alire community index. The JSON resources are generated directly from the indexed TOML manifests and preserve every manifest field. A package's `selected_version` is its newest published release, or its newest development release when no published release exists. Every version also carries a `dependants` array naming the indexed releases that require it, the version set each one declares, and whether that requirement is satisfied by the version in question.
+The JSON resources are generated directly from indexed TOML manifests and preserve every manifest field. Every dependency records the catalog and highest matching release selected using Alire version-set semantics.
 
 ## Catalog
 
-- [Catalog home]({CANONICAL_URL}): Browse, search, and configure the Flyology Alire index.
-- [Aggregate JSON catalog]({CANONICAL_URL}crates.json): Complete package and version inventory, including every parsed manifest.
-- [Change history]({CANONICAL_URL}changes/): Publications and development-source updates derived from Git history.
-- [JSON schema notes]({CANONICAL_URL}README.txt): Field semantics and endpoint conventions.
+- [Catalog home]({canonical_url}): Browse and search this Alire index.
+- [Aggregate JSON catalog]({canonical_url}crates.json): Complete package and version inventory, including every parsed manifest.
+- [Change history]({canonical_url}changes/): Publications and manifest updates derived from Git history.
+- [JSON schema notes]({canonical_url}README.txt): Field semantics and endpoint conventions.
 
 ## Packages
 
@@ -2369,7 +2720,7 @@ This index is separate from the Alire community index. The JSON resources are ge
 
 ## Optional
 
-- [Source repository]({REPOSITORY_URL}): Alire manifests, site generator, and index configuration.
+- [Source repository]({repository_url}): Alire manifests and index configuration.
 """
 
 
@@ -2445,15 +2796,117 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_catalog_site(
+    catalog: dict[str, Any],
+    history: list[dict[str, Any]],
+    output: Path,
+    release_documents: dict[str, ReleaseDocuments] | None = None,
+) -> None:
+    documents = release_documents or {}
+    (output / "assets" / "styles").mkdir(parents=True)
+    (output / "assets" / "scripts").mkdir(parents=True)
+    (output / "crates").mkdir(parents=True)
+    (output / "changes").mkdir(parents=True)
+
+    write_json(output / "crates.json", catalog)
+    shared = {
+        key: catalog[key]
+        for key in (
+            "schema_version",
+            "generated_at",
+            "canonical_url",
+            "catalog",
+            "index",
+        )
+    }
+    for package in catalog["packages"]:
+        encoded_name = segment(package["name"])
+        package_directory = output / "crates" / path_segment(package["name"])
+        package_directory.mkdir(parents=True)
+        selected = release_for(package, package["selected_version"])
+        write_json(
+            output / "crates" / f"{path_segment(package['name'])}.json",
+            {**shared, "package": package},
+        )
+        (package_directory / "index.html").write_text(
+            render_detail_page(
+                package,
+                selected,
+                catalog,
+                page_kind="package",
+                documents=documents.get(
+                    selected["path"], EMPTY_RELEASE_DOCUMENTS
+                ),
+            ),
+            encoding="utf-8",
+        )
+        for release in package["versions"]:
+            version_directory = package_directory / path_segment(release["version"])
+            version_directory.mkdir(parents=True)
+            write_json(version_directory / "manifest.json", release["manifest"])
+            (version_directory / "index.html").write_text(
+                render_detail_page(
+                    package,
+                    release,
+                    catalog,
+                    page_kind="version",
+                    documents=documents.get(
+                        release["path"], EMPTY_RELEASE_DOCUMENTS
+                    ),
+                ),
+                encoding="utf-8",
+            )
+
+    (output / "index.html").write_text(
+        render_html(catalog, history), encoding="utf-8"
+    )
+    (output / "changes" / "index.html").write_text(
+        render_changes_page(catalog, history), encoding="utf-8"
+    )
+    (output / "assets" / "styles" / "index.css").write_text(
+        INDEX_CSS.strip() + "\n", encoding="utf-8"
+    )
+    (output / "assets" / "scripts" / "index.js").write_text(
+        INDEX_JS.strip() + "\n", encoding="utf-8"
+    )
+    (output / "flyology-mark.svg").write_text(FLYOLOGY_MARK, encoding="utf-8")
+    (output / "flyology-logo.svg").write_text(FLYOLOGY_LOGO, encoding="utf-8")
+    (output / "README.txt").write_text(README_TEXT, encoding="utf-8")
+    (output / "llms.txt").write_text(render_llms(catalog), encoding="utf-8")
+
+
 def generate(
     source: Path,
     output: Path,
     *,
     include_source_documents: bool = False,
     source_cache: Path | None = None,
+    community_source: Path | None = None,
 ) -> dict[str, Any]:
-    catalog = load_catalog(source)
-    history = load_change_history(catalog)
+    catalog = load_catalog(source, attach_relationships=False)
+    community_catalog = (
+        load_catalog(
+            community_source,
+            catalog_name="community",
+            canonical_url=COMMUNITY_CANONICAL_URL,
+            repository_url=COMMUNITY_REPOSITORY_URL,
+            attach_relationships=False,
+        )
+        if community_source is not None
+        else None
+    )
+    relationship_packages = list(catalog["packages"])
+    if community_catalog is not None:
+        relationship_packages.extend(community_catalog["packages"])
+    attach_dependants(relationship_packages)
+    attach_resolved_dependencies(relationship_packages)
+
+    history = load_change_history(catalog, source.parent)
+    community_history = (
+        load_change_history(community_catalog, community_source.parent)
+        if community_catalog is not None and community_source is not None
+        else []
+    )
     release_documents: dict[str, ReleaseDocuments] = {}
     if include_source_documents:
         temporary_cache = (
@@ -2486,58 +2939,13 @@ def generate(
                 temporary_cache.cleanup()
     if output.exists():
         shutil.rmtree(output)
-    (output / "assets" / "styles").mkdir(parents=True)
-    (output / "assets" / "scripts").mkdir(parents=True)
-    (output / "crates").mkdir(parents=True)
-    (output / "changes").mkdir(parents=True)
-
-    write_json(output / "crates.json", catalog)
-    shared = {key: catalog[key] for key in ("schema_version", "generated_at", "canonical_url", "index")}
-    for package in catalog["packages"]:
-        encoded_name = segment(package["name"])
-        package_directory = output / "crates" / encoded_name
-        package_directory.mkdir(parents=True)
-        selected = release_for(package, package["selected_version"])
-        write_json(output / "crates" / f"{encoded_name}.json", {**shared, "package": package})
-        (package_directory / "index.html").write_text(
-            render_detail_page(
-                package,
-                selected,
-                page_kind="package",
-                packages=catalog["packages"],
-                documents=release_documents.get(
-                    selected["path"], EMPTY_RELEASE_DOCUMENTS
-                ),
-            ),
-            encoding="utf-8",
+    write_catalog_site(catalog, history, output, release_documents)
+    if community_catalog is not None:
+        write_catalog_site(
+            community_catalog,
+            community_history,
+            output / "community",
         )
-        for release in package["versions"]:
-            version_directory = package_directory / segment(release["version"])
-            version_directory.mkdir(parents=True)
-            write_json(version_directory / "manifest.json", release["manifest"])
-            (version_directory / "index.html").write_text(
-                render_detail_page(
-                    package,
-                    release,
-                    page_kind="version",
-                    packages=catalog["packages"],
-                    documents=release_documents.get(
-                        release["path"], EMPTY_RELEASE_DOCUMENTS
-                    ),
-                ),
-                encoding="utf-8",
-            )
-
-    (output / "index.html").write_text(render_html(catalog, history), encoding="utf-8")
-    (output / "changes" / "index.html").write_text(
-        render_changes_page(history), encoding="utf-8"
-    )
-    (output / "assets" / "styles" / "index.css").write_text(INDEX_CSS.strip() + "\n", encoding="utf-8")
-    (output / "assets" / "scripts" / "index.js").write_text(INDEX_JS.strip() + "\n", encoding="utf-8")
-    (output / "flyology-mark.svg").write_text(FLYOLOGY_MARK, encoding="utf-8")
-    (output / "flyology-logo.svg").write_text(FLYOLOGY_LOGO, encoding="utf-8")
-    (output / "README.txt").write_text(README_TEXT, encoding="utf-8")
-    (output / "llms.txt").write_text(render_llms(catalog), encoding="utf-8")
     (output / ".nojekyll").write_text("", encoding="utf-8")
     return catalog
 
@@ -2546,6 +2954,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "index")
     parser.add_argument("--output", type=Path, default=ROOT / "build" / "site")
+    parser.add_argument(
+        "--community-source",
+        type=Path,
+        help="also render a shadow of this checked-out community index under /community",
+    )
     parser.add_argument(
         "--skip-source-documents",
         action="store_true",
@@ -2563,12 +2976,19 @@ def main() -> int:
             args.output.resolve(),
             include_source_documents=not args.skip_source_documents,
             source_cache=args.source_cache.resolve() if args.source_cache else None,
+            community_source=(
+                args.community_source.resolve() if args.community_source else None
+            ),
         )
     except (OSError, RuntimeError, tomllib.TOMLDecodeError, ValueError) as error:
         print(f"site generation failed: {error}", file=sys.stderr)
         return 1
-    versions = sum(len(package["versions"]) for package in catalog["packages"])
-    print(f"Generated {len(catalog['packages'])} packages and {versions} manifests at {args.output}")
+    package_count = len(catalog["packages"])
+    version_count = sum(len(package["versions"]) for package in catalog["packages"])
+    scope = f"{package_count} Flyology packages and {version_count} manifests"
+    if args.community_source:
+        scope += " plus the community shadow"
+    print(f"Generated {scope} at {args.output}")
     return 0
 
 

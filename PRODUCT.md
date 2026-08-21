@@ -8,7 +8,8 @@ product
 
 Ada and GNAT developers use the index to discover Flyology-maintained crates,
 compare the versions available to Alire, inspect dependency and platform
-constraints, and obtain machine-readable package metadata for tooling.
+constraints across Flyology and the community index, and obtain
+machine-readable package metadata for tooling.
 
 ## Product Purpose
 
@@ -16,6 +17,9 @@ The Flyology crate index is the human and machine-readable view of the custom
 Alire index. It should make every indexed manifest easy to inspect, keep the
 shortest path to configuring Alire obvious, and publish a stable JSON contract
 that other sites can consume without maintaining a second package inventory.
+Its community shadow should make cross-index resolution inspectable and expose
+recent community crate additions and updates without implying that Flyology
+owns those manifests.
 
 ## Brand Personality
 
@@ -37,6 +41,8 @@ that competes with package data.
 - Keep the installation command and downloadable JSON within one action.
 - Derive every published representation from the TOML manifests so the page
   and API cannot drift from the Alire index.
+- Preserve catalog provenance and index-priority resolution wherever a package
+  crosses between Flyology and community.
 - Reuse the Flyology website kit's visual language and interaction patterns.
 
 ## Accessibility & Inclusion

@@ -20,7 +20,11 @@ exact source commits so an indexed version does not change after publication.
 
 The index is published at [crates.flyology.org](https://crates.flyology.org/).
 The site is generated from the TOML manifests on every push to `main`; it does
-not maintain a separate package inventory.
+not maintain a separate package inventory. The same build checks out the Alire
+community index with full history and publishes a read-only shadow at
+[`/community/`](https://crates.flyology.org/community/). GitHub Actions rebuilds
+both catalogs on every push and once per day so community-only changes are
+picked up without a Flyology commit.
 
 Machine-readable data is available as an aggregate catalog and as one file per
 package, plus a direct manifest object for each version:
@@ -29,14 +33,23 @@ package, plus a direct manifest object for each version:
 - `https://crates.flyology.org/crates/<package-name>.json`
 - `https://crates.flyology.org/crates/<package-name>/<version>/manifest.json`
 
+The community shadow exposes the same endpoints beneath `/community`, for
+example `https://crates.flyology.org/community/crates.json` and
+`https://crates.flyology.org/community/crates/<package-name>/<version>/`.
+
 LLM-oriented catalog discovery is available at
 `https://crates.flyology.org/llms.txt`.
 
 Both forms contain the complete parsed manifest for every indexed version,
-along with the indexed releases that depend on it. Each dependant records the
-version set it declares and whether that requirement is satisfied, resolved
-through `provides` so a dependency on `gnat` is matched against the version a
-toolchain stands in for. Requirements are evaluated with Alire's
+the resolved target for each dependency, and the indexed releases that depend
+on it. Resolution follows the configured index order: Flyology first, then
+community, selecting the highest matching release from the first catalog that
+can satisfy the version set. Conditional dependencies retain their branch,
+and community system externals link to a synthetic `system` release because
+their concrete version is detected on the user's host. Each dependant records
+the version set it declares and whether that requirement is satisfied,
+resolved through `provides` so a dependency on `gnat` is matched against the
+version a toolchain stands in for. Requirements are evaluated with Alire's
 `semantic_versioning` rules.
 
 Human-readable routes include:
@@ -44,6 +57,8 @@ Human-readable routes include:
 - `https://crates.flyology.org/crates/<package-name>/`
 - `https://crates.flyology.org/crates/<package-name>/<version>/`
 - `https://crates.flyology.org/changes/`
+- `https://crates.flyology.org/community/`
+- `https://crates.flyology.org/community/changes/`
 
 The package page selects the newest published version. If a crate has only
 `-dev` manifests, it selects the newest development version and identifies the
@@ -58,18 +73,30 @@ Relative documentation links and images remain pinned to the source commit used.
 homepage includes a bounded digest of recent index activity. The changes page derives its detailed publication and
 development-update history from Git, including source revision and dependency
 changes, so the Pages checkout retains full repository history.
+The community landing page has the same bounded recent-changes digest for
+crates and versions added or updated in that index, with the complete derived
+history at `/community/changes/`. Community pages intentionally omit README
+and changelog source cloning: mirroring hundreds of upstream source
+repositories during every site build would make the shadow unreliable, while
+the structured manifests, relationships, provenance, and JSON remain complete.
 GitHub Pages serves JSON with `Access-Control-Allow-Origin: *`, so browser
 applications on other origins can fetch these URLs directly. GitHub Pages does
 not support repository-defined custom response headers, so clients should
 treat this CORS policy as hosting-platform behavior.
 
-Build and check the site locally with a checkout of
-[`flyology-ada/website-kit`](https://github.com/flyology-ada/website-kit):
+Build and check the site locally with checkouts of
+[`flyology-ada/website-kit`](https://github.com/flyology-ada/website-kit) and
+[`alire-project/alire-index`](https://github.com/alire-project/alire-index):
 
 ```sh
 python3 -m pip install -r requirements-site.txt
-WEBSITE_KIT_DIR=../website-kit ./scripts/build-site.sh
+WEBSITE_KIT_DIR=../website-kit \
+COMMUNITY_INDEX_DIR=../alire-index \
+  ./scripts/build-site.sh
 ```
+
+If `COMMUNITY_INDEX_DIR/index/index.toml` is absent, the local build generates
+only the Flyology catalog. CI always supplies the community checkout.
 
 The generator requires Python 3.11 or newer. Set `PYTHON` if the modern Python
 executable is not the first `python3` on your path. Site generation fetches the

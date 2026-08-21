@@ -48,11 +48,16 @@ wall of detached cards.
 ## Information hierarchy
 
 The index has three levels: an introductory band with the Alire setup command,
-a search and type filter, and one semantic disclosure per crate. Each closed
+a search and type filter, and one semantic disclosure per crate. A matching
+community shadow lives at `/community/`; the primary navigation and footer
+make the catalog boundary explicit while retaining the same information
+architecture. The cross-catalog action is an outlined, direction-marked switch
+rather than an ordinary peer navigation label. Each closed
 disclosure shows the crate name, selected release, description, and status. Its
-open state presents that release's structured metadata, its dependencies and
-dependants, and direct links to other versions. Dedicated crate and version routes render the complete release
-without duplicating every manifest on the front page.
+open state uses the same composition as a dedicated crate page: structured
+metadata in the main column and indexed versions, dependencies, dependants,
+and manifest JSON in the right rail. Dedicated crate and version routes render
+the complete release without duplicating every manifest on the front page.
 
 ## Components
 
@@ -61,6 +66,9 @@ without duplicating every manifest on the front page.
 - Crate disclosures are full-width rows with one-pixel separators. Hover and
   open states use tonal surfaces, not decorative shadows.
 - Version labels and executable values use the shared mono stack.
+- Each landing page places a compact, bounded crate-change digest before the
+  package catalog. The detailed changes route expands that Git-derived history
+  into added versions, development advances, and manifest updates.
 - Dependant lists group by crate on a tonal surface, newest version first.
   The dependant's own selected version is bold, and each row ends with a
   verdict in a right-aligned rail so qualification scans vertically. The
@@ -80,7 +88,11 @@ without duplicating every manifest on the front page.
   direct manifest JSON download together in a right-hand information rail.
   The main release column contains the manifest metadata without repeating the
   complete JSON inline. Dependency rows link to the highest indexed release
-  admitted by their version set, including releases matched through `provides`.
+  admitted by their version set in index-priority order, including community
+  releases, system externals, conditional branches, and releases matched
+  through `provides`. Each row identifies whether Flyology or community
+  supplied the match. Cross-catalog dependant groups link back to the exact
+  dependant version.
   Dependant group names link to that crate's highest qualifying release, or
   its highest listed release when the current version qualifies none of them.
 

@@ -3,6 +3,8 @@ name: Pages
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +30,13 @@ jobs:
           repository: flyology-ada/website-kit
           ref: bd3bd1253872c731ae77fd57bd62f7fedc022378
           path: vendor/website-kit
+          persist-credentials: false
+      - name: Check out Alire community index
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: alire-project/alire-index
+          path: vendor/alire-community-index
+          fetch-depth: 0
           persist-credentials: false
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

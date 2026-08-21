@@ -37,7 +37,7 @@ class GenerateSiteTests(unittest.TestCase):
 
     def test_json_preserves_the_complete_manifest(self) -> None:
         aggregate = json.loads((self.output / "crates.json").read_text(encoding="utf-8"))
-        self.assertEqual(aggregate["schema_version"], 3)
+        self.assertEqual(aggregate["schema_version"], 4)
         for package in aggregate["packages"]:
             package_file = json.loads((self.output / "crates" / f"{generate_site.segment(package['name'])}.json").read_text(encoding="utf-8"))
             self.assertEqual(package_file["package"], package)
@@ -53,9 +53,24 @@ class GenerateSiteTests(unittest.TestCase):
             self.assertIn(f'>{package["name"]}</span>', page)
             self.assertIn(f'crates/{package["name"]}.json', page)
             self.assertIn(f'crates/{package["name"]}/', page)
-        self.assertEqual(page.count('class="raw-manifest"'), len(self.catalog["packages"]))
+        self.assertNotIn('class="raw-manifest"', page)
         development_only = sum(package["development_only"] for package in self.catalog["packages"])
         self.assertEqual(page.count("Development only"), development_only)
+
+    def test_url_segments_and_manifest_websites_are_safe(self) -> None:
+        self.assertEqual(generate_site.segment("1.0.0+build"), "1.0.0%2Bbuild")
+        self.assertEqual(generate_site.path_segment("1.0.0+build"), "1.0.0+build")
+        self.assertEqual(generate_site.field("Website", ""), "")
+        self.assertIn(
+            'href="https://example.com"',
+            generate_site.field("Website", "example.com", link=True),
+        )
+        self.assertNotIn(
+            "href=",
+            generate_site.field("Website", "not a URL", link=True),
+        )
+        with self.assertRaises(ValueError):
+            generate_site.path_segment("../escape")
 
     def test_llms_file_describes_catalog_and_every_package(self) -> None:
         document = (self.output / "llms.txt").read_text(encoding="utf-8")
@@ -91,6 +106,13 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertNotIn('<rect x="12" y="12"', mark)
         self.assertIn("Flyology primary icon", icon)
         self.assertNotIn(':root[data-theme="dark"] .brand img.brand-mark { filter: none; }', styles)
+
+    def test_header_distinguishes_the_cross_catalog_switch(self) -> None:
+        home = (self.output / "index.html").read_text(encoding="utf-8")
+        self.assertIn(
+            'class="catalog-switch" href="./community/"><span>Community index</span>',
+            home,
+        )
 
     def test_home_page_has_a_bounded_change_preview(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")
@@ -135,6 +157,16 @@ class GenerateSiteTests(unittest.TestCase):
         )
         self.assertEqual(published["kind"], "published")
         self.assertEqual(published["changed_fields"], [])
+        added = generate_site.change_entry(
+            "A",
+            "index/ne/new_crate/new_crate-1.0.0.toml",
+            None,
+            {"name": "new_crate", "version": "1.0.0"},
+            package_added=True,
+        )
+        assert added
+        self.assertEqual(added["kind"], "package")
+        self.assertEqual(generate_site.change_kind_label(added["kind"]), "New crate")
         updated_html = generate_site.render_change_entry(
             updated, root_prefix="", detailed=True
         )
@@ -211,7 +243,9 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn(
             '<a class="dependency-row dependency-link" '
             'href="../../../crates/flyology/0.1.0/">'
-            '<code>flyology</code><span>=0.1.0</span></a>',
+            '<span class="dependency-identity"><code>flyology</code>'
+            '<small>Flyology · 0.1.0</small></span>'
+            '<span class="dependency-requirement">=0.1.0</span></a>',
             page,
         )
 
@@ -243,6 +277,114 @@ class GenerateSiteTests(unittest.TestCase):
             "flyology_postgres</a>",
             crate_page,
         )
+
+    def test_community_shadow_resolves_links_and_records_crate_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def initialise_repository(name: str) -> tuple[Path, Path]:
+                repository = root / name
+                source = repository / "index"
+                source.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q", str(repository)], check=True)
+                subprocess.run(
+                    ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(repository), "config", "user.name", "Test"],
+                    check=True,
+                )
+                (source / "index.toml").write_text('version = "1.4.0"\n', encoding="utf-8")
+                subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+                subprocess.run(
+                    ["git", "-C", str(repository), "commit", "-qm", "index metadata"],
+                    check=True,
+                )
+                return repository, source
+
+            flyology_repository, flyology_source = initialise_repository("flyology")
+            community_repository, community_source = initialise_repository("community")
+
+            consumer = flyology_source / "co" / "consumer"
+            consumer.mkdir(parents=True)
+            (consumer / "consumer-1.0.0.toml").write_text(
+                '''name = "consumer"
+version = "1.0.0"
+description = "Uses community packages"
+
+[[depends-on]]
+aunit = "^1.0.0"
+system_random = "*"
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(flyology_repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(flyology_repository), "commit", "-qm", "add consumer"],
+                check=True,
+            )
+
+            aunit = community_source / "au" / "aunit"
+            aunit.mkdir(parents=True)
+            (aunit / "aunit-1.0.0.toml").write_text(
+                'name = "aunit"\nversion = "1.0.0"\ndescription = "Ada tests"\n',
+                encoding="utf-8",
+            )
+            system_random = community_source / "sy" / "system_random"
+            system_random.mkdir(parents=True)
+            (system_random / "system_random-external.toml").write_text(
+                'name = "system_random"\ndescription = "System randomness"\n\n[external]\nkind = "system"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(community_repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(community_repository), "commit", "-qm", "add packages"],
+                check=True,
+            )
+
+            output = root / "site"
+            catalog = generate_site.generate(
+                flyology_source,
+                output,
+                community_source=community_source,
+            )
+            consumer_release = catalog["packages"][0]["versions"][0]
+            self.assertEqual(
+                [(item["name"], item["catalog"], item["version"]) for item in consumer_release["dependencies"]],
+                [("aunit", "community", "1.0.0"), ("system_random", "community", "system")],
+            )
+
+            consumer_page = (
+                output / "crates" / "consumer" / "1.0.0" / "index.html"
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                'href="../../../community/crates/aunit/1.0.0/"', consumer_page
+            )
+            self.assertIn("Community · 1.0.0", consumer_page)
+            self.assertIn(
+                'href="../../../community/crates/system_random/system/"', consumer_page
+            )
+
+            community_home = (output / "community" / "index.html").read_text(
+                encoding="utf-8"
+            )
+            community_changes = (
+                output / "community" / "changes" / "index.html"
+            ).read_text(encoding="utf-8")
+            aunit_page = (
+                output / "community" / "crates" / "aunit" / "1.0.0" / "index.html"
+            ).read_text(encoding="utf-8")
+            self.assertIn("Recent changes.", community_home)
+            self.assertIn("aunit", community_home)
+            self.assertIn("New crate", community_changes)
+            self.assertIn("aunit <code>1.0.0</code>", community_changes)
+            self.assertIn('href="../../../../crates/consumer/1.0.0/"', aunit_page)
+            self.assertIn("Flyology", aunit_page)
+            self.assertTrue((output / "community" / "crates.json").is_file())
+            self.assertTrue(
+                (output / "community" / "crates" / "aunit.json").is_file()
+            )
 
     def test_source_documents_follow_subdir_parents_and_pin_the_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -524,6 +666,7 @@ Not release notes.
         page = generate_site.render_detail_page(
             package,
             release,
+            self.catalog,
             page_kind="version",
             documents=generate_site.ReleaseDocuments(base, notes, older_notes),
         )
@@ -638,21 +781,20 @@ Not release notes.
         self.assertIn("index/xx/base/base-1.0.0.toml", message)
         self.assertIn("not a version", message)
 
-        #  A dynamic expression has no one crate name, so it would silently
-        #  drop out of the index rather than resolve to a dependant row.
-        with self.assertRaises(ValueError) as raised:
-            generate_site.attach_dependants(
-                [
-                    package("base", {}),
-                    package(
-                        "consumer",
-                        {"depends-on": [{"case(os)": {"linux": {"base": "^1.0.0"}}}]},
-                    ),
-                ]
-            )
-        message = str(raised.exception)
-        self.assertIn("index/xx/consumer/consumer-1.0.0.toml", message)
-        self.assertIn("case(os)", message)
+        #  Conditional dependencies are resolved and retain the branch that
+        #  controls whether the relationship applies.
+        packages = [
+            package("base", {}),
+            package(
+                "consumer",
+                {"depends-on": [{"case(os)": {"linux": {"base": "^1.0.0"}}}]},
+            ),
+        ]
+        generate_site.attach_dependants(packages)
+        self.assertEqual(
+            packages[0]["versions"][0]["dependants"][0]["condition"],
+            "case(os)=linux",
+        )
 
         #  An unreadable requirement nothing depends on cannot mislead anyone.
         generate_site.attach_dependants([package("lonely", {"provides": ["ghost=not a version"]})])
@@ -767,6 +909,8 @@ Not release notes.
     def test_json_records_dependants_for_every_release(self) -> None:
         aggregate = json.loads((self.output / "crates.json").read_text(encoding="utf-8"))
         fields = {
+            "catalog",
+            "condition",
             "name",
             "version",
             "development",
@@ -803,7 +947,7 @@ Not release notes.
             if record["name"] == "flyology_http" and record["selected"]
         )
 
-        self.assertEqual(home.count(">Dependants</h4>"), len(self.catalog["packages"]))
+        self.assertEqual(home.count(">Dependants</h3>"), len(self.catalog["packages"]))
         self.assertIn(
             f'Resolved against <code>flyology 0.1.0</code> — {qualifying} of '
             f'{len(selected["dependants"])} dependant releases qualify.',
