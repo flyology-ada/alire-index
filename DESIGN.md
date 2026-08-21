@@ -69,6 +69,20 @@ without duplicating every manifest on the front page.
   availability facts; neither is used as interchangeable decoration.
 - JSON and repository links use the website kit's standard primary and
   secondary pill actions.
+- Full crate pages place version-specific changelog prose before the pinned
+  README below structured release data. Release notes use an initially open
+  native disclosure, and a nested, initially closed **See more** disclosure
+  reveals only changelog entries following the current version, without
+  repeating it or showing newer entries above it. A compact source-document
+  rail identifies both materials. Markdown stays within a 74-character reading
+  measure and is separated by rules rather than nested in decorative cards.
+- Full crate pages keep indexed versions, dependencies, dependants, and the
+  direct manifest JSON download together in a right-hand information rail.
+  The main release column contains the manifest metadata without repeating the
+  complete JSON inline. Dependency rows link to the highest indexed release
+  admitted by their version set, including releases matched through `provides`.
+  Dependant group names link to that crate's highest qualifying release, or
+  its highest listed release when the current version qualifies none of them.
 
 ## Responsive and accessible behavior
 
@@ -77,4 +91,6 @@ origins, hashes, and JSON scroll horizontally rather than shrinking. Native
 `details` and `summary` elements retain keyboard and assistive-technology
 behavior. Filtering reports its result count through a polite live region.
 Motion is limited to transforms and opacity and is removed when reduced motion
-is requested.
+is requested. Source Markdown headings are normalized beneath the page and
+section headings, tables scroll horizontally, images remain fluid, and code
+blocks preserve their own horizontal scrolling.

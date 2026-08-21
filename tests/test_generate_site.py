@@ -4,6 +4,7 @@ import html
 import importlib.util
 import json
 import re
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -170,12 +171,392 @@ class GenerateSiteTests(unittest.TestCase):
             package_page = (self.output / "crates" / name / "index.html").read_text(encoding="utf-8")
             self.assertIn(package["selected_version"], package_page)
             self.assertIn('Indexed versions', package_page)
+            selected_version = generate_site.segment(package["selected_version"])
+            self.assertIn(f'href="{selected_version}/manifest.json"', package_page)
+            self.assertNotIn('class="raw-manifest"', package_page)
             for release in package["versions"]:
                 version = generate_site.segment(release["version"])
                 version_page = (self.output / "crates" / name / version / "index.html").read_text(encoding="utf-8")
+                manifest_file = self.output / "crates" / name / version / "manifest.json"
                 self.assertIn(f'<span aria-current="page">{release["version"]}</span>', version_page)
                 self.assertIn('Complete manifest as JSON', version_page)
+                self.assertIn('href="manifest.json"', version_page)
                 self.assertIn(f'href="../{version}/"', version_page)
+                self.assertNotIn('class="raw-manifest"', version_page)
+                self.assertEqual(
+                    json.loads(manifest_file.read_text(encoding="utf-8")),
+                    release["manifest"],
+                )
+                self.assertLess(
+                    version_page.index("Indexed versions"),
+                    version_page.index(">Dependencies</h3>"),
+                )
+                self.assertLess(
+                    version_page.index(">Dependencies</h3>"),
+                    version_page.index(">Dependants</h3>"),
+                )
+                self.assertLess(
+                    version_page.index(">Dependants</h3>"),
+                    version_page.index("Complete manifest as JSON"),
+                )
+
+    def test_relationship_names_link_to_the_highest_matching_versions(self) -> None:
+        page = (
+            self.output
+            / "crates"
+            / "flyology_http"
+            / "0.1.1"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '<a class="dependency-row dependency-link" '
+            'href="../../../crates/flyology/0.1.0/">'
+            '<code>flyology</code><span>=0.1.0</span></a>',
+            page,
+        )
+
+        flyology = next(
+            package
+            for package in self.catalog["packages"]
+            if package["name"] == "flyology"
+        )
+        selected = generate_site.release_for(
+            flyology, flyology["selected_version"]
+        )
+        top_http = next(
+            record
+            for record in selected["dependants"]
+            if record["name"] == "flyology_http"
+        )
+        crate_page = (
+            self.output / "crates" / "flyology" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            f'<a class="dependant-name" '
+            f'href="../../crates/flyology_http/{top_http["version"]}/">'
+            "flyology_http</a>",
+            crate_page,
+        )
+        self.assertIn(
+            '<a class="dependant-name" '
+            'href="../../crates/flyology_postgres/0.1.0/">'
+            "flyology_postgres</a>",
+            crate_page,
+        )
+
+    def test_source_documents_follow_subdir_parents_and_pin_the_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "source"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"],
+                check=True,
+            )
+            crate = repository / "crates" / "widget"
+            (crate / "deep").mkdir(parents=True)
+            (crate / "deep" / "alire.toml").write_text(
+                'name = "widget"\nversion = "1.2.3"\n', encoding="utf-8"
+            )
+            (crate / "readme.MD").write_text(
+                "# Widget\n\nDocumentation from the nearest parent.\n",
+                encoding="utf-8",
+            )
+            (repository / "CHANGELOG.md").write_text(
+                """# Changelog
+
+## [1.2.3] - 2026-08-20
+
+### Added
+
+- Exact release notes.
+
+## [1.2.30] - 2026-08-21
+
+- A different version.
+""",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-qm", "fixture"],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            loader = generate_site.SourceDocumentLoader(root / "cache")
+            origin = {
+                "url": repository.as_uri(),
+                "commit": commit,
+                "subdir": "crates/widget/deep",
+            }
+            documents = loader.load({"version": "1.2.3", "origin": origin})
+            assert documents.readme and documents.changelog
+            assert documents.changelog_remainder
+            self.assertEqual(documents.readme.path, "crates/widget/readme.MD")
+            self.assertEqual(documents.changelog.path, "CHANGELOG.md")
+            self.assertIn("Exact release notes.", documents.changelog.markdown)
+            self.assertNotIn("1.2.30", documents.changelog.markdown)
+            self.assertNotIn("Exact release notes.", documents.changelog_remainder.markdown)
+            self.assertIn("1.2.30", documents.changelog_remainder.markdown)
+
+            other = loader.load({"version": "1.2.30", "origin": origin})
+            assert other.changelog
+            self.assertIn("A different version.", other.changelog.markdown)
+            self.assertNotIn("Exact release notes.", other.changelog.markdown)
+
+    def test_changelog_extraction_requires_the_exact_version_heading(self) -> None:
+        changelog = """## v0.1.0
+First.
+
+## 0.1.0-dev
+Development.
+
+## 0.1.1
+Second.
+
+## Migrating from 0.1.0
+Not release notes.
+"""
+        self.assertEqual(
+            generate_site.extract_changelog_version(changelog, "0.1.0"), "First."
+        )
+        self.assertEqual(
+            generate_site.extract_changelog_version(changelog, "0.1.0-dev"),
+            "Development.",
+        )
+        self.assertIsNone(
+            generate_site.extract_changelog_version(changelog, "0.1.2")
+        )
+        self.assertIsNone(
+            generate_site.extract_changelog_version(
+                "## Migrating from 0.1.0\nNot release notes.\n", "0.1.0"
+            )
+        )
+
+    def test_missing_pinned_changelog_uses_another_indexed_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "source"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"],
+                check=True,
+            )
+            (repository / "README.md").write_text("# Widget\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-qm", "old release"],
+                check=True,
+            )
+            old_commit = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (repository / "CHANGELOG.md").write_text(
+                """# Changelog
+
+## 1.1.0
+
+- New notes.
+
+## 1.0.0
+
+- Historical notes. ([commit abc1234])
+
+## 0.9.0
+
+- Earlier notes.
+
+[commit abc1234]: https://github.com/example/widget/commit/abc1234
+""",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-qm", "add changelog"],
+                check=True,
+            )
+            new_commit = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            loader = generate_site.SourceDocumentLoader(root / "cache")
+            old_manifest = {
+                "version": "1.0.0",
+                "origin": {"url": repository.as_uri(), "commit": old_commit},
+            }
+            new_manifest = {
+                "version": "1.1.0",
+                "origin": {"url": repository.as_uri(), "commit": new_commit},
+            }
+            self.assertIsNone(loader.load(old_manifest).changelog)
+            loader.load(new_manifest)
+            fallback = loader.fallback_changelog(old_manifest)
+            assert fallback
+            excerpt, remainder = fallback
+            self.assertEqual(excerpt.commit, new_commit)
+            self.assertIn("Historical notes.", excerpt.markdown)
+            self.assertIn("commit abc1234", excerpt.markdown)
+            assert remainder
+            self.assertNotIn("Historical notes.", remainder.markdown)
+            self.assertNotIn("New notes.", remainder.markdown)
+            self.assertIn("Earlier notes.", remainder.markdown)
+
+    def test_changelog_extraction_preserves_pr_and_commit_links(self) -> None:
+        changelog = """# Changelog
+
+## [1.2.3] - 2026-08-21
+
+- Fixed the transport. ([PR #28], [commit ca058ef])
+
+## [1.2.2] - 2026-08-20
+
+- Earlier work. ([PR #27])
+
+[1.2.3]: https://github.com/example/widget/compare/v1.2.2...v1.2.3
+[PR #27]: https://github.com/example/widget/pull/27
+[PR #28]: https://github.com/example/widget/pull/28
+[commit ca058ef]: https://github.com/example/widget/commit/ca058ef1234567890
+"""
+        extracted = generate_site.extract_changelog_version(changelog, "1.2.3")
+        assert extracted
+        self.assertIn("[PR #28]: https://github.com/example/widget/pull/28", extracted)
+        self.assertIn(
+            "[commit ca058ef]: https://github.com/example/widget/commit/ca058ef1234567890",
+            extracted,
+        )
+        rendered = generate_site.render_source_markdown(
+            generate_site.SourceDocument(
+                extracted,
+                "CHANGELOG.md",
+                "git+https://github.com/example/widget.git",
+                "a" * 40,
+            )
+        )
+        self.assertIn(
+            '<a href="https://github.com/example/widget/pull/28">PR #28</a>',
+            rendered,
+        )
+        self.assertIn(
+            '<a href="https://github.com/example/widget/commit/ca058ef1234567890">commit ca058ef</a>',
+            rendered,
+        )
+        self.assertNotIn("Earlier work", rendered)
+
+    def test_source_markdown_is_safe_and_uses_pinned_relative_urls(self) -> None:
+        document = generate_site.SourceDocument(
+            """# Widget
+
+[Setup](guide/setup.md#start)
+
+![Logo](assets/logo.png)
+
+[Jump](#details)
+
+## Details
+
+| Feature | State |
+| --- | --- |
+| Docs | ready |
+
+<script>alert('unsafe')</script>
+""",
+            "crates/widget/README.md",
+            "git+https://github.com/example/widgets.git",
+            "a" * 40,
+        )
+        rendered = generate_site.render_source_markdown(document)
+        self.assertIn('<h3 id="widget">Widget</h3>', rendered)
+        self.assertIn('<h4 id="details">Details</h4>', rendered)
+        self.assertIn('href="#details"', rendered)
+        self.assertIn(
+            f'href="https://github.com/example/widgets/blob/{"a" * 40}/crates/widget/guide/setup.md#start"',
+            rendered,
+        )
+        self.assertIn(
+            f'src="https://raw.githubusercontent.com/example/widgets/{"a" * 40}/crates/widget/assets/logo.png"',
+            rendered,
+        )
+        self.assertNotIn("<script>", rendered)
+        self.assertNotIn("alert", rendered)
+        self.assertIn("<table>", rendered)
+
+    def test_full_page_renders_readme_and_version_release_notes(self) -> None:
+        package = next(
+            candidate
+            for candidate in self.catalog["packages"]
+            if candidate["name"] == "flyology"
+        )
+        release = generate_site.release_for(package, package["selected_version"])
+        base = generate_site.SourceDocument(
+            "# Flyology\n\nPinned documentation.\n\n[Jump](#details)\n\n## Details\n",
+            "README.md",
+            "git+https://github.com/flyology-ada/flyology.git",
+            "a" * 40,
+        )
+        notes = base._replace(
+            markdown="### Fixed\n\nVersion-specific notes.\n", path="CHANGELOG.md"
+        )
+        older_notes = base._replace(
+            markdown="# Changelog\n\n## 0.0.9\n\nEarlier notes.\n",
+            path="CHANGELOG.md",
+        )
+        page = generate_site.render_detail_page(
+            package,
+            release,
+            page_kind="version",
+            documents=generate_site.ReleaseDocuments(base, notes, older_notes),
+        )
+        self.assertIn('class="source-documents"', page)
+        self.assertIn(">README</h2>", page)
+        self.assertIn("Pinned documentation.", page)
+        self.assertIn(
+            f'id="readme-flyology-{release["version"]}-details"', page
+        )
+        self.assertIn(
+            f'href="#readme-flyology-{release["version"]}-details"', page
+        )
+        self.assertIn("Changelog excerpt", page)
+        self.assertIn(f"Release notes <code>{release['version']}</code>", page)
+        self.assertIn("Version-specific notes.", page)
+        self.assertLess(page.index("Changelog excerpt"), page.index(">README</h2>"))
+        self.assertIn(
+            'class="source-document source-document-collapsible"', page
+        )
+        self.assertIn('class="source-document-summary"', page)
+        self.assertIn(
+            'class="source-document-toggle-open">Collapse</span>', page
+        )
+        self.assertIn('aria-labelledby="release-notes-flyology-', page)
+        self.assertIn(' open>', page)
+        self.assertIn('class="changelog-more"', page)
+        self.assertIn('class="changelog-more-closed">See more</span>', page)
+        self.assertIn("Earlier notes.", page)
+        self.assertNotIn('<details class="changelog-more" open>', page)
+        self.assertIn(
+            f'https://github.com/flyology-ada/flyology/blob/{"a" * 40}/README.md',
+            page,
+        )
 
     def test_version_sets_follow_alire_semantics(self) -> None:
         #  Verified against Semantic_Versioning as built by Alire; note that '~'

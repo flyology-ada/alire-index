@@ -31,6 +31,8 @@ jobs:
           persist-credentials: false
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Install site generator dependencies
+        run: python3 -m pip install --requirement requirements-site.txt
       - name: Test generator
         run: python3 -m unittest discover -s tests -v
       - name: Build site

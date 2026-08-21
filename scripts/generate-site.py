@@ -12,13 +12,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections import defaultdict
 from datetime import UTC, date, datetime, time
 from itertools import groupby
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -361,6 +362,391 @@ def release_for(package: dict[str, Any], version: str) -> dict[str, Any]:
 
 def segment(value: str) -> str:
     return quote(value, safe="")
+
+
+class SourceDocument(NamedTuple):
+    """Markdown loaded from the immutable source tree of an indexed release."""
+
+    markdown: str
+    path: str
+    repository_url: str
+    commit: str
+
+
+class ReleaseDocuments(NamedTuple):
+    readme: SourceDocument | None
+    changelog: SourceDocument | None
+    changelog_remainder: SourceDocument | None
+
+
+EMPTY_RELEASE_DOCUMENTS = ReleaseDocuments(None, None, None)
+
+
+def source_repository_url(url: str) -> str:
+    return url.removeprefix("git+")
+
+
+def source_browser_url(document: SourceDocument) -> str | None:
+    """Return a stable browser URL for a document when its host is GitHub."""
+    repository = source_repository_url(document.repository_url).removesuffix(".git")
+    parsed = urlsplit(repository)
+    if parsed.netloc.lower() != "github.com":
+        return None
+    path = quote(document.path, safe="/")
+    return f"{repository}/blob/{quote(document.commit, safe='')}/{path}"
+
+
+def rewrite_source_url(value: str, document: SourceDocument, *, image: bool) -> str:
+    """Resolve a Markdown URL against the pinned document in its source tree."""
+    parsed_value = urlsplit(value)
+    if parsed_value.scheme or parsed_value.netloc or value.startswith("#"):
+        return value
+
+    repository = source_repository_url(document.repository_url).removesuffix(".git")
+    parsed_repository = urlsplit(repository)
+    if parsed_repository.netloc.lower() != "github.com":
+        return value
+
+    document_parent = PurePosixPath(document.path).parent
+    relative_path = parsed_value.path.lstrip("/")
+    base = PurePosixPath() if parsed_value.path.startswith("/") else document_parent
+    parts: list[str] = []
+    for part in (base / relative_path).parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    path = "/".join(quote(part, safe="") for part in parts)
+    if image:
+        owner_repository = parsed_repository.path.strip("/")
+        rewritten = (
+            f"https://raw.githubusercontent.com/{owner_repository}/"
+            f"{quote(document.commit, safe='')}/{path}"
+        )
+    else:
+        rewritten = (
+            f"{repository}/blob/{quote(document.commit, safe='')}/{path}"
+        )
+    return urlunsplit((*urlsplit(rewritten)[:3], parsed_value.query, parsed_value.fragment))
+
+
+def render_source_markdown(
+    document: SourceDocument, *, anchor_prefix: str = ""
+) -> str:
+    """Render CommonMark safely, resolving relative links to the pinned tree."""
+    try:
+        from markdown_it import MarkdownIt
+    except ImportError as error:
+        raise RuntimeError(
+            "markdown-it-py is required to render source documentation; "
+            "install requirements-site.txt"
+        ) from error
+
+    renderer = MarkdownIt("commonmark", {"html": True}).enable(
+        ["strikethrough", "table"]
+    )
+    renderer.renderer.rules["html_block"] = lambda *_args: ""
+    renderer.renderer.rules["html_inline"] = lambda *_args: ""
+    tokens = renderer.parse(document.markdown)
+    heading_levels = [
+        int(token.tag[1:])
+        for token in tokens
+        if token.type == "heading_open" and token.tag.startswith("h")
+    ]
+    heading_offset = 3 - min(heading_levels) if heading_levels else 0
+    heading_slugs: dict[str, int] = defaultdict(int)
+    for index, token in enumerate(tokens):
+        if token.type in ("heading_open", "heading_close"):
+            token.tag = f"h{min(6, int(token.tag[1:]) + heading_offset)}"
+        if token.type == "heading_open" and index + 1 < len(tokens):
+            inline = tokens[index + 1]
+            visible_text = "".join(
+                child.content
+                for child in inline.children or []
+                if child.type in ("text", "code_inline", "image")
+            )
+            base_slug = re.sub(r"[^\w\s-]", "", visible_text.lower()).strip()
+            base_slug = re.sub(r"\s+", "-", base_slug) or "section"
+            occurrence = heading_slugs[base_slug]
+            heading_slugs[base_slug] += 1
+            slug = base_slug if occurrence == 0 else f"{base_slug}-{occurrence}"
+            if anchor_prefix:
+                slug = f"{anchor_prefix}-{slug}"
+            token.attrSet("id", slug)
+        if token.type != "inline":
+            continue
+        for child in token.children or []:
+            if child.type == "link_open":
+                href = child.attrGet("href")
+                if href is not None:
+                    if anchor_prefix and href.startswith("#"):
+                        href = f"#{anchor_prefix}-{href[1:]}"
+                    child.attrSet(
+                        "href", rewrite_source_url(href, document, image=False)
+                    )
+            elif child.type == "image":
+                source = child.attrGet("src")
+                if source is not None:
+                    child.attrSet(
+                        "src", rewrite_source_url(source, document, image=True)
+                    )
+    return renderer.renderer.render(tokens, renderer.options, {})
+
+
+CHANGELOG_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
+
+
+def markdown_reference_definitions(markdown: str) -> str:
+    """Return every CommonMark link definition without rendering it visibly."""
+    try:
+        from markdown_it import MarkdownIt
+    except ImportError as error:
+        raise RuntimeError(
+            "markdown-it-py is required to read changelog links; "
+            "install requirements-site.txt"
+        ) from error
+
+    environment: dict[str, Any] = {}
+    MarkdownIt("commonmark").parse(markdown, environment)
+    lines = markdown.splitlines()
+    definitions = []
+    seen: set[tuple[int, int]] = set()
+    for reference in environment.get("references", {}).values():
+        start, end = reference["map"]
+        location = start, end
+        if location in seen:
+            continue
+        seen.add(location)
+        definitions.append("\n".join(lines[start:end]))
+    return "\n".join(definitions)
+
+
+def changelog_version_bounds(
+    markdown: str, version: str
+) -> tuple[int, int, int] | None:
+    """Return heading start, body start, and section end for exactly VERSION."""
+    version_pattern = re.compile(
+        rf"^\s*\[?(?:(?:version|release)\s+)?v?{re.escape(version)}"
+        rf"(?![0-9A-Za-z.+-])\]?(?:\([^)]*\))?(?:\s*(?:[-:/(]|$))",
+        re.IGNORECASE,
+    )
+    headings = list(CHANGELOG_HEADING.finditer(markdown))
+    for index, heading in enumerate(headings):
+        if not version_pattern.search(heading.group(2)):
+            continue
+        level = len(heading.group(1))
+        end = len(markdown)
+        for following in headings[index + 1 :]:
+            if len(following.group(1)) <= level:
+                end = following.start()
+                break
+        definitions = markdown_reference_definitions(markdown)
+        if definitions:
+            definition_start = markdown.find(definitions)
+            if heading.end() < definition_start < end:
+                end = definition_start
+        return heading.start(), heading.end(), end
+    return None
+
+
+def extract_changelog_version(markdown: str, version: str) -> str | None:
+    """Extract one exact version while retaining global reference links."""
+    bounds = changelog_version_bounds(markdown, version)
+    if bounds is not None:
+        _heading_start, body_start, end = bounds
+        body = markdown[body_start:end].strip()
+        if not body:
+            return None
+        definitions = markdown_reference_definitions(markdown)
+        return f"{body}\n\n{definitions}" if definitions else body
+    return None
+
+
+def changelog_after_version(markdown: str, version: str) -> str | None:
+    """Return only changelog entries following exactly VERSION's section."""
+    bounds = changelog_version_bounds(markdown, version)
+    if bounds is None:
+        return None
+    _heading_start, _body_start, end = bounds
+    after = markdown[end:].lstrip()
+    definitions = markdown_reference_definitions(markdown)
+    visible = after.replace(definitions, "").strip() if definitions else after.strip()
+    return after if visible else None
+
+
+class SourceDocumentLoader:
+    """Read release documentation from cached bare clones at pinned commits."""
+
+    def __init__(self, cache: Path):
+        self.cache = cache
+        self.cache.mkdir(parents=True, exist_ok=True)
+        self.repositories: dict[str, Path] = {}
+        self.documents: dict[tuple[str, str, str, str], ReleaseDocuments] = {}
+        self.commits: dict[str, list[str]] = defaultdict(list)
+
+    def git(self, repository: Path | None, *args: str) -> str:
+        command = ["git"]
+        if repository is not None:
+            command.extend(["-C", str(repository)])
+        command.extend(args)
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or "git failed"
+            raise ValueError(f"source documentation: {detail}")
+        return result.stdout
+
+    def repository(self, url: str, commit: str) -> Path:
+        clone_url = source_repository_url(url)
+        repository = self.repositories.get(clone_url)
+        if repository is None:
+            digest = hashlib.sha256(clone_url.encode()).hexdigest()[:20]
+            repository = self.cache / f"repository-{digest}.git"
+            if not repository.exists():
+                self.git(
+                    None,
+                    "clone",
+                    "--bare",
+                    "--filter=blob:none",
+                    "--quiet",
+                    clone_url,
+                    str(repository),
+                )
+            self.repositories[clone_url] = repository
+        exists = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "-e", f"{commit}^{{commit}}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if exists.returncode:
+            self.git(repository, "fetch", "--quiet", "origin", commit)
+        return repository
+
+    def tree_entries(self, repository: Path, commit: str, directory: str) -> list[str]:
+        tree = f"{commit}:{directory}" if directory else commit
+        return self.git(repository, "ls-tree", "--name-only", tree).splitlines()
+
+    def find_document(
+        self,
+        repository: Path,
+        repository_url: str,
+        commit: str,
+        subdir: str,
+        filename: str,
+    ) -> SourceDocument | None:
+        directory = PurePosixPath(subdir) if subdir else PurePosixPath()
+        if directory.is_absolute() or ".." in directory.parts:
+            raise ValueError(f"unsafe source documentation subdir: {subdir!r}")
+        while True:
+            directory_text = "" if str(directory) == "." else directory.as_posix()
+            entries = self.tree_entries(repository, commit, directory_text)
+            match = next(
+                (entry for entry in entries if entry.casefold() == filename.casefold()),
+                None,
+            )
+            if match is not None:
+                path = f"{directory_text}/{match}" if directory_text else match
+                content = self.git(repository, "show", f"{commit}:{path}")
+                return SourceDocument(content, path, repository_url, commit)
+            if not directory_text:
+                return None
+            directory = directory.parent
+
+    def load(self, manifest: dict[str, Any]) -> ReleaseDocuments:
+        origin = manifest.get("origin")
+        if not isinstance(origin, dict):
+            return EMPTY_RELEASE_DOCUMENTS
+        repository_url = origin.get("url")
+        commit = origin.get("commit")
+        subdir = origin.get("subdir", "")
+        if not isinstance(repository_url, str) or not isinstance(commit, str):
+            return EMPTY_RELEASE_DOCUMENTS
+        if not isinstance(subdir, str):
+            raise ValueError("source documentation origin subdir must be a string")
+        if commit not in self.commits[repository_url]:
+            self.commits[repository_url].append(commit)
+        key = repository_url, commit, subdir, str(manifest["version"])
+        if key in self.documents:
+            return self.documents[key]
+        repository = self.repository(repository_url, commit)
+        readme = self.find_document(
+            repository, repository_url, commit, subdir, "README.md"
+        )
+        changelog = self.find_document(
+            repository, repository_url, commit, subdir, "CHANGELOG.md"
+        )
+        changelog_remainder = None
+        if changelog is not None:
+            full_changelog = changelog
+            extracted = extract_changelog_version(
+                full_changelog.markdown, manifest["version"]
+            )
+            remainder = changelog_after_version(
+                full_changelog.markdown, manifest["version"]
+            )
+            changelog = (
+                full_changelog._replace(markdown=extracted) if extracted else None
+            )
+            changelog_remainder = (
+                full_changelog._replace(markdown=remainder) if remainder else None
+            )
+        documents = ReleaseDocuments(readme, changelog, changelog_remainder)
+        self.documents[key] = documents
+        return documents
+
+    def fallback_changelog(
+        self, manifest: dict[str, Any]
+    ) -> tuple[SourceDocument, SourceDocument | None] | None:
+        """Find VERSION in the same changelog path at another indexed commit."""
+        origin = manifest.get("origin")
+        if not isinstance(origin, dict):
+            return None
+        repository_url = origin.get("url")
+        own_commit = origin.get("commit")
+        subdir = origin.get("subdir", "")
+        version = manifest.get("version")
+        if not all(
+            isinstance(value, str)
+            for value in (repository_url, own_commit, subdir, version)
+        ):
+            return None
+        for commit in self.commits.get(repository_url, []):
+            if commit == own_commit:
+                continue
+            repository = self.repository(repository_url, commit)
+            if subdir:
+                exists = subprocess.run(
+                    ["git", "-C", str(repository), "cat-file", "-e", f"{commit}:{subdir}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if exists.returncode:
+                    continue
+            full_changelog = self.find_document(
+                repository, repository_url, commit, subdir, "CHANGELOG.md"
+            )
+            if full_changelog is None:
+                continue
+            extracted = extract_changelog_version(full_changelog.markdown, version)
+            if extracted is None:
+                continue
+            remainder = changelog_after_version(full_changelog.markdown, version)
+            excerpt_document = full_changelog._replace(markdown=extracted)
+            remainder_document = (
+                full_changelog._replace(markdown=remainder) if remainder else None
+            )
+            return excerpt_document, remainder_document
+        return None
 
 
 def provided_identities(
@@ -737,15 +1123,67 @@ def field(label: str, value: Any, *, link: bool = False) -> str:
     return f"<div><dt>{html.escape(label)}</dt><dd>{rendered}</dd></div>"
 
 
-def dependency_rows(manifest: dict[str, Any]) -> str:
+def matching_dependency_release(
+    packages: list[dict[str, Any]], required: str, requirement: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return the highest indexed release satisfying one dependency."""
+    best: tuple[dict[str, Any], dict[str, Any], Semver] | None = None
+    for package in packages:
+        for release in package["versions"]:
+            for identity, provided_version in provided_identities(
+                package["name"], release["version"], release["manifest"]
+            ):
+                if identity != required.lower():
+                    continue
+                candidate = parse_semver(provided_version, relaxed=True)
+                if not requirement_admits(requirement, provided_version):
+                    continue
+                if best is None or semver_precedes(best[2], candidate):
+                    best = package, release, candidate
+                    continue
+                if semver_equivalent(best[2], candidate) and version_key(
+                    best[1]["version"]
+                ) < version_key(release["version"]):
+                    best = package, release, candidate
+    return (best[0], best[1]) if best is not None else None
+
+
+def dependency_rows(
+    manifest: dict[str, Any],
+    *,
+    packages: list[dict[str, Any]] | None = None,
+    root_prefix: str = "",
+) -> str:
     dependencies = manifest.get("depends-on", [])
     if not dependencies:
         return '<p class="quiet">No package dependencies declared.</p>'
     rows = []
     for group in dependencies:
         for name, constraint in group.items():
+            constraint_text = text(constraint)
+            target = (
+                matching_dependency_release(packages, name, constraint_text)
+                if packages is not None
+                else None
+            )
+            content = (
+                f"<code>{html.escape(name)}</code>"
+                f"<span>{html.escape(constraint_text)}</span>"
+            )
+            if target is None:
+                row = f'<span class="dependency-row">{content}</span>'
+            else:
+                target_package, target_release = target
+                href = (
+                    f'{root_prefix}crates/{segment(target_package["name"])}/'
+                    f'{segment(target_release["version"])}/'
+                )
+                row = (
+                    f'<a class="dependency-row dependency-link" '
+                    f'href="{html.escape(href, quote=True)}">{content}</a>'
+                )
             rows.append(
-                f'<li><code>{html.escape(name)}</code><span>{html.escape(text(constraint))}</span></li>'
+                f"<li>{row}</li>"
             )
     return '<ul class="dependency-list">' + "".join(rows) + "</ul>"
 
@@ -776,7 +1214,8 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
         f'{"qualifies" if qualifying == 1 else "qualify"}.'
     )
     groups = []
-    for name, records in groupby(dependants, key=lambda record: record["name"]):
+    for name, record_group in groupby(dependants, key=lambda record: record["name"]):
+        records = list(record_group)
         rows = []
         for record in records:
             state, label = dependant_verdict(record["qualifies"])
@@ -797,9 +1236,15 @@ def dependant_rows(package_name: str, release: dict[str, Any], root_prefix: str)
                 f'<span class="dependant-verdict">{label}</span>'
                 "</li>"
             )
+        top_match = next(
+            (record for record in records if record["qualifies"]), records[0]
+        )
+        top_release_href = (
+            f'{root_prefix}crates/{segment(name)}/{segment(top_match["version"])}/'
+        )
         groups.append(
             '<li class="dependant-group">'
-            f'<a class="dependant-name" href="{root_prefix}crates/{segment(name)}/">{html.escape(name)}</a>'
+            f'<a class="dependant-name" href="{html.escape(top_release_href, quote=True)}">{html.escape(name)}</a>'
             f'<ul class="dependant-releases">{"".join(rows)}</ul>'
             "</li>"
         )
@@ -853,11 +1298,34 @@ def render_release_detail(
     heading_level: int,
     raw_expanded: bool,
     root_prefix: str,
+    packages: list[dict[str, Any]] | None = None,
+    include_relationships: bool = True,
+    include_raw_manifest: bool = True,
 ) -> str:
     manifest = release["manifest"]
-    raw = html.escape(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True))
     heading = f"h{heading_level}"
     child_heading = f"h{min(heading_level + 1, 6)}"
+    relationships = ""
+    if include_relationships:
+        relationships = f"""
+        <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
+          <{child_heading} id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</{child_heading}>
+          {dependency_rows(manifest, packages=packages, root_prefix=root_prefix)}
+        </section>
+        <section class="detail-section" aria-labelledby="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">
+          <{child_heading} id="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">Dependants</{child_heading}>
+          {dependant_rows(package_name, release, root_prefix)}
+        </section>"""
+    raw_manifest = ""
+    if include_raw_manifest:
+        raw = html.escape(
+            json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True)
+        )
+        raw_manifest = f"""
+        <details class="raw-manifest"{' open' if raw_expanded else ''}>
+          <summary>Complete manifest as JSON</summary>
+          <pre><code>{raw}</code></pre>
+        </details>"""
     return f"""
       <section class="release-detail" aria-labelledby="release-{html.escape(package_name)}-{html.escape(release['version'])}">
         <div class="release-heading">
@@ -865,18 +1333,8 @@ def render_release_detail(
           {status_badge(release)}
         </div>
         <dl class="metadata">{release_metadata(release)}</dl>
-        <section class="detail-section" aria-labelledby="deps-{html.escape(package_name)}-{html.escape(release['version'])}">
-          <{child_heading} id="deps-{html.escape(package_name)}-{html.escape(release['version'])}">Dependencies</{child_heading}>
-          {dependency_rows(manifest)}
-        </section>
-        <section class="detail-section" aria-labelledby="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">
-          <{child_heading} id="dependants-{html.escape(package_name)}-{html.escape(release['version'])}">Dependants</{child_heading}>
-          {dependant_rows(package_name, release, root_prefix)}
-        </section>
-        <details class="raw-manifest"{' open' if raw_expanded else ''}>
-          <summary>Complete manifest as JSON</summary>
-          <pre><code>{raw}</code></pre>
-        </details>
+        {relationships}
+        {raw_manifest}
       </section>"""
 
 
@@ -923,7 +1381,36 @@ def render_version_links(
     return f'<section class="version-index"><h3>{html.escape(title)}</h3><ul class="version-links">{"".join(items)}</ul></section>'
 
 
-def render_package(package: dict[str, Any]) -> str:
+def render_detail_rail(
+    package: dict[str, Any],
+    release: dict[str, Any],
+    *,
+    context: str,
+    root_prefix: str,
+    manifest_href: str,
+    packages: list[dict[str, Any]] | None = None,
+) -> str:
+    name = package["name"]
+    version = release["version"]
+    identity = f"{html.escape(name)}-{html.escape(version)}"
+    return f"""
+      <aside class="detail-page-rail" aria-label="Version relationships and downloads">
+        {render_version_links(package, context=context, current_version=version, exclude_current=False, title='Indexed versions')}
+        <section class="detail-rail-section" aria-labelledby="rail-deps-{identity}">
+          <h3 id="rail-deps-{identity}">Dependencies</h3>
+          {dependency_rows(release["manifest"], packages=packages, root_prefix=root_prefix)}
+        </section>
+        <section class="detail-rail-section" aria-labelledby="rail-dependants-{identity}">
+          <h3 id="rail-dependants-{identity}">Dependants</h3>
+          {dependant_rows(name, release, root_prefix)}
+        </section>
+        <a class="manifest-json-link" href="{html.escape(manifest_href, quote=True)}" download>Complete manifest as JSON</a>
+      </aside>"""
+
+
+def render_package(
+    package: dict[str, Any], packages: list[dict[str, Any]] | None = None
+) -> str:
     selected = release_for(package, package["selected_version"])
     manifest = selected["manifest"]
     tags = manifest.get("tags", [])
@@ -956,7 +1443,7 @@ def render_package(package: dict[str, Any]) -> str:
           </span>
         </div>
         <div class="package-release-layout">
-          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False, root_prefix='')}
+          {render_release_detail(package['name'], selected, heading_level=3, raw_expanded=False, root_prefix='', packages=packages)}
           {render_version_links(package, context='home', current_version=selected['version'], exclude_current=True, title='Other versions')}
         </div>
       </div>
@@ -1128,7 +1615,9 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
     packages = catalog["packages"]
     manifest_count = sum(len(package["versions"]) for package in packages)
     source_count = sum(package_kind(package["versions"][0]["manifest"]) == "source" for package in packages)
-    package_html = "".join(render_package(package) for package in packages)
+    package_html = "".join(
+        render_package(package, packages) for package in packages
+    )
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -1308,11 +1797,108 @@ def render_detail_footer(root_prefix: str, package: dict[str, Any]) -> str:
     </footer>"""
 
 
+def render_source_document(
+    document: SourceDocument,
+    *,
+    identifier: str,
+    eyebrow: str,
+    title: str,
+    collapsible: bool = False,
+    remainder: SourceDocument | None = None,
+) -> str:
+    source_url = source_browser_url(document)
+    source_link = (
+        f'<a href="{html.escape(source_url, quote=True)}">View source</a>'
+        if source_url
+        else ""
+    )
+    rendered = render_source_markdown(document, anchor_prefix=identifier)
+    if collapsible:
+        more = ""
+        if remainder is not None:
+            remainder_html = render_source_markdown(
+                remainder, anchor_prefix=f"{identifier}-more"
+            )
+            more = f"""
+            <details class="changelog-more">
+              <summary>
+                <span class="changelog-more-closed">See more</span>
+                <span class="changelog-more-open">Show less</span>
+                <span class="changelog-more-icon" aria-hidden="true"></span>
+              </summary>
+              <div class="changelog-more-body">{remainder_html}</div>
+            </details>"""
+        return f"""
+      <details class="source-document source-document-collapsible" aria-labelledby="{identifier}" open>
+        <summary class="source-document-summary">
+          <span>
+            <span class="eyebrow">{html.escape(eyebrow)}</span>
+            <span class="source-document-title" id="{identifier}">{title}</span>
+          </span>
+          <span class="source-document-toggle" aria-hidden="true">
+            <span class="source-document-toggle-open">Collapse</span>
+            <span class="source-document-toggle-closed">Expand</span>
+            <span class="source-document-toggle-icon"></span>
+          </span>
+        </summary>
+        <div class="source-document-collapsible-body">
+          <div class="source-document-source-link">{source_link}</div>
+          <div class="markdown-body">{rendered}{more}</div>
+        </div>
+      </details>"""
+    return f"""
+      <section class="source-document" aria-labelledby="{identifier}">
+        <header class="source-document-heading">
+          <div>
+            <p class="eyebrow">{html.escape(eyebrow)}</p>
+            <h2 id="{identifier}">{title}</h2>
+          </div>
+          {source_link}
+        </header>
+        <div class="markdown-body">{rendered}</div>
+      </section>"""
+
+
+def render_source_documents(
+    documents: ReleaseDocuments,
+    *,
+    package_name: str,
+    version: str,
+) -> str:
+    sections = []
+    identity = f"{segment(package_name)}-{segment(version)}"
+    if documents.changelog is not None:
+        sections.append(
+            render_source_document(
+                documents.changelog,
+                identifier=f"release-notes-{identity}",
+                eyebrow="Changelog excerpt",
+                title=f'Release notes <code>{html.escape(version)}</code>',
+                collapsible=True,
+                remainder=documents.changelog_remainder,
+            )
+        )
+    if documents.readme is not None:
+        sections.append(
+            render_source_document(
+                documents.readme,
+                identifier=f"readme-{identity}",
+                eyebrow="Source documentation",
+                title="README",
+            )
+        )
+    if not sections:
+        return ""
+    return f'<div class="source-documents">{"".join(sections)}</div>'
+
+
 def render_detail_page(
     package: dict[str, Any],
     release: dict[str, Any],
     *,
     page_kind: str,
+    documents: ReleaseDocuments = EMPTY_RELEASE_DOCUMENTS,
+    packages: list[dict[str, Any]] | None = None,
 ) -> str:
     is_version_page = page_kind == "version"
     root_prefix = "../../../" if is_version_page else "../../"
@@ -1331,11 +1917,13 @@ def render_detail_page(
         breadcrumbs = f'<a href="{root_prefix}">Index</a><span aria-hidden="true">/</span><a href="../">{html.escape(name)}</a><span aria-hidden="true">/</span><span aria-current="page">{html.escape(version)}</span>'
         package_action = '<a class="button button-secondary" href="../">All crate versions</a>'
         json_href = f"../../{encoded_name}.json"
+        manifest_href = "manifest.json"
         version_context = "version"
     else:
         breadcrumbs = f'<a href="{root_prefix}">Index</a><span aria-hidden="true">/</span><span aria-current="page">{html.escape(name)}</span>'
         package_action = f'<a class="button button-secondary" href="{encoded_version}/">Version page</a>'
         json_href = f"../{encoded_name}.json"
+        manifest_href = f"{encoded_version}/manifest.json"
         version_context = "package"
     return f"""<!doctype html>
 <html lang="en">
@@ -1369,9 +1957,10 @@ def render_detail_page(
         </div>
       </header>
       <div class="detail-page-layout">
-        {render_release_detail(name, release, heading_level=2, raw_expanded=True, root_prefix=root_prefix)}
-        {render_version_links(package, context=version_context, current_version=version, exclude_current=False, title='Indexed versions')}
+        {render_release_detail(name, release, heading_level=2, raw_expanded=False, root_prefix=root_prefix, packages=packages, include_relationships=False, include_raw_manifest=False)}
+        {render_detail_rail(package, release, context=version_context, root_prefix=root_prefix, manifest_href=manifest_href, packages=packages)}
       </div>
+      {render_source_documents(documents, package_name=name, version=version)}
     </main>
     {render_detail_footer(root_prefix, package)}
   </body>
@@ -1461,7 +2050,11 @@ INDEX_CSS = r"""
 .detail-section h4 { margin-bottom: .7rem; font-size: .82rem; }
 .quiet { color: var(--ink-soft); font-size: .8rem; }
 .dependency-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
-.dependency-list li { display: grid; grid-template-columns: minmax(10rem, .3fr) 1fr; padding: .55rem .7rem; gap: 1rem; background: var(--surface); font-size: .76rem; }
+.dependency-list li { background: var(--surface); font-size: .76rem; }
+.dependency-row { display: grid; grid-template-columns: minmax(10rem, .3fr) minmax(0, 1fr); padding: .55rem .7rem; gap: 1rem; }
+.dependency-link { color: var(--ink); text-decoration: none; }
+.dependency-link:hover { background: var(--surface-strong); }
+.dependency-link:hover code { color: var(--violet-deep); }
 .dependency-list span { color: var(--ink-soft); font-family: var(--font-mono); }
 .dependant-summary { margin: 0 0 .7rem; }
 .dependant-list { display: grid; margin: 0; padding: 0; gap: .45rem; list-style: none; }
@@ -1494,8 +2087,70 @@ INDEX_CSS = r"""
 .crate-hero > p:not(.eyebrow) { max-width: 62ch; margin: 1.3rem 0 1.8rem; color: var(--ink-soft); font-size: 1.05rem; }
 .crate-release-line { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; }
 .crate-release-line code { color: var(--violet-deep); font-size: .9rem; }
-.detail-page-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, .34fr); align-items: start; gap: clamp(2rem, 6vw, 5rem); padding-top: 2rem; border-top: 1px solid var(--line); }
-.detail-page-layout .raw-manifest pre { max-height: none; }
+.detail-page-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(20rem, .46fr); align-items: start; gap: clamp(2rem, 6vw, 5rem); padding-top: 2rem; border-top: 1px solid var(--line); }
+.detail-page-rail { display: grid; min-width: 0; gap: 2rem; }
+.detail-rail-section { min-width: 0; }
+.detail-rail-section h3 { margin-bottom: .7rem; font-size: .82rem; letter-spacing: -.01em; }
+.detail-page-rail .dependency-row { grid-template-columns: minmax(7rem, .7fr) minmax(0, 1fr); }
+.detail-page-rail .dependant-release { grid-template-columns: minmax(5.5rem, .5fr) minmax(0, 1fr) 4.8rem; gap: .6rem; }
+.manifest-json-link { display: flex; justify-content: space-between; align-items: center; padding: .8rem .15rem; border-block: 1px solid var(--line); gap: 1rem; font-size: .76rem; font-weight: 620; text-decoration: none; }
+.manifest-json-link::after { content: "↓"; color: var(--ink-soft); font-size: .9rem; }
+.manifest-json-link:hover { background: var(--surface); }
+.source-documents { margin-top: clamp(4rem, 9vw, 7rem); border-top: 1px solid var(--line); }
+.source-document { display: grid; grid-template-columns: minmax(11rem, .3fr) minmax(0, 1fr); padding-block: clamp(2.5rem, 6vw, 4.5rem); gap: clamp(2rem, 7vw, 6rem); border-bottom: 1px solid var(--line); }
+.source-document-heading { align-self: start; }
+.source-document-heading h2 { margin: .35rem 0 .8rem; font-size: 1.35rem; letter-spacing: -.025em; }
+.source-document-heading h2 code { display: block; margin-top: .4rem; color: var(--violet-deep); font-size: .72rem; font-weight: 400; overflow-wrap: anywhere; }
+.source-document-heading > a { font-size: .72rem; font-weight: 620; }
+.source-document-collapsible { display: block; padding-block: 0; }
+.source-document-summary { display: grid; grid-template-columns: minmax(11rem, .3fr) minmax(0, 1fr); align-items: center; padding-block: clamp(2.5rem, 6vw, 4.5rem); gap: clamp(2rem, 7vw, 6rem); cursor: pointer; list-style: none; }
+.source-document-summary::-webkit-details-marker { display: none; }
+.source-document-summary .eyebrow { display: block; }
+.source-document-title { display: block; margin-top: .35rem; font-size: 1.35rem; font-weight: 620; letter-spacing: -.025em; }
+.source-document-title code { display: block; margin-top: .4rem; color: var(--violet-deep); font-size: .72rem; font-weight: 400; overflow-wrap: anywhere; }
+.source-document-toggle { display: inline-flex; justify-self: end; align-items: center; gap: .55rem; color: var(--ink-soft); font-size: .7rem; font-weight: 620; }
+.source-document-toggle-icon { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); }
+.source-document-toggle-icon::before { content: "+"; font-size: 1rem; line-height: 1; }
+.source-document-collapsible[open] .source-document-toggle-icon::before { content: "−"; }
+.source-document-collapsible[open] .source-document-toggle-closed, .source-document-collapsible:not([open]) .source-document-toggle-open { display: none; }
+.source-document-summary:hover .source-document-title { color: var(--violet-deep); }
+.source-document-summary:hover .source-document-toggle-icon { background: var(--surface); }
+.source-document-summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .35rem; }
+.source-document-collapsible-body { display: grid; grid-template-columns: minmax(11rem, .3fr) minmax(0, 1fr); padding-bottom: clamp(2.5rem, 6vw, 4.5rem); gap: clamp(2rem, 7vw, 6rem); }
+.source-document-source-link { font-size: .72rem; font-weight: 620; }
+.changelog-more { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.changelog-more > summary { display: inline-flex; align-items: center; gap: .55rem; color: var(--violet-deep); font-size: .76rem; font-weight: 620; cursor: pointer; list-style: none; }
+.changelog-more > summary::-webkit-details-marker { display: none; }
+.changelog-more-icon { display: grid; width: 1.55rem; height: 1.55rem; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); }
+.changelog-more-icon::before { content: "+"; font-size: .9rem; line-height: 1; }
+.changelog-more[open] .changelog-more-icon::before { content: "−"; }
+.changelog-more[open] .changelog-more-closed, .changelog-more:not([open]) .changelog-more-open { display: none; }
+.changelog-more > summary:hover { color: var(--violet); }
+.changelog-more > summary:hover .changelog-more-icon { background: var(--surface); }
+.changelog-more > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .3rem; }
+.changelog-more-body { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+.markdown-body { min-width: 0; max-width: 74ch; color: var(--ink); overflow-wrap: anywhere; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { max-width: 100%; margin: 2.2rem 0 .75rem; letter-spacing: -.018em; }
+.markdown-body h3 { font-size: 1.35rem; }
+.markdown-body h4 { font-size: 1.08rem; }
+.markdown-body h5, .markdown-body h6 { font-size: .9rem; }
+.markdown-body p, .markdown-body li { font-size: .94rem; line-height: 1.72; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.4rem; }
+.markdown-body li + li { margin-top: .32rem; }
+.markdown-body a { text-underline-offset: .16em; }
+.markdown-body img { display: block; max-width: 100%; height: auto; margin-block: 1.5rem; border-radius: var(--radius-sm); }
+.markdown-body blockquote { margin: 1.5rem 0; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-soft); }
+.markdown-body blockquote > :first-child { margin-top: 0; }
+.markdown-body blockquote > :last-child { margin-bottom: 0; }
+.markdown-body code { padding: .12em .32em; border-radius: .25rem; background: var(--surface-strong); font-size: .82em; }
+.markdown-body pre { max-width: 100%; padding: 1rem; overflow: auto; border: 1px solid var(--code-line); border-radius: var(--radius-md); background: var(--code-bg); color: oklch(91% .02 270); font-size: .76rem; line-height: 1.65; }
+.markdown-body pre code { padding: 0; background: transparent; color: inherit; font-size: inherit; }
+.markdown-body table { display: block; max-width: 100%; margin-block: 1.5rem; overflow-x: auto; border-collapse: collapse; font-size: .82rem; }
+.markdown-body th, .markdown-body td { padding: .55rem .7rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.markdown-body th { background: var(--surface); font-weight: 620; }
+.markdown-body hr { margin-block: 2.5rem; border: 0; border-top: 1px solid var(--line); }
 .changes-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
 .changes-hero { max-width: 58rem; padding-block: clamp(4rem, 8vw, 7rem); }
 .changes-hero h1 { max-width: 100%; margin-bottom: 1rem; font-size: clamp(2.8rem, 7vw, 6rem); }
@@ -1541,6 +2196,11 @@ INDEX_CSS = r"""
   .package-description { grid-column: 1 / -1; grid-row: 2; }
   .summary-action { grid-column: 2; grid-row: 1; }
   .package-release-layout, .detail-page-layout { grid-template-columns: 1fr; }
+  .source-document { grid-template-columns: 1fr; gap: 1.5rem; }
+  .source-document-heading { display: flex; justify-content: space-between; align-items: end; gap: 1rem; }
+  .source-document-collapsible { display: block; }
+  .source-document-summary { grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; }
+  .source-document-collapsible-body { grid-template-columns: 1fr; gap: 1rem; }
   .metadata { grid-template-columns: 1fr; }
   .metadata div:nth-child(odd) { margin-right: 0; }
   .change-group-entries { margin-left: 0; }
@@ -1562,7 +2222,7 @@ INDEX_CSS = r"""
   .package-summary { min-height: 0; padding-block: 1.4rem; }
   .package-body { padding-inline: .35rem; }
   .package-links { width: 100%; margin-left: 0; }
-  .metadata div, .dependency-list li { grid-template-columns: 1fr; gap: .3rem; }
+  .metadata div, .dependency-row { grid-template-columns: 1fr; gap: .3rem; }
   .dependant-releases { gap: .55rem; }
   .dependant-release { grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .8rem; }
   .dependant-release > a { grid-area: 1 / 1; }
@@ -1655,6 +2315,9 @@ is the newest development release.
 Every version has a path and manifest field. The manifest is a lossless JSON
 representation of the corresponding TOML manifest, subject only to TOML date
 and time values being represented as ISO 8601 strings.
+
+The same manifest object is also available directly at
+crates/<name>/<version>/manifest.json.
 
 Every version also has a dependants array listing the indexed releases that
 depend on it, grouped by crate name and ordered newest version first. Each
@@ -1782,9 +2445,45 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def generate(source: Path, output: Path) -> dict[str, Any]:
+def generate(
+    source: Path,
+    output: Path,
+    *,
+    include_source_documents: bool = False,
+    source_cache: Path | None = None,
+) -> dict[str, Any]:
     catalog = load_catalog(source)
     history = load_change_history(catalog)
+    release_documents: dict[str, ReleaseDocuments] = {}
+    if include_source_documents:
+        temporary_cache = (
+            tempfile.TemporaryDirectory(prefix="alire-index-sources-")
+            if source_cache is None
+            else None
+        )
+        cache = source_cache or Path(temporary_cache.name)  # type: ignore[union-attr]
+        try:
+            loader = SourceDocumentLoader(cache)
+            for package in catalog["packages"]:
+                for release in package["versions"]:
+                    release_documents[release["path"]] = loader.load(
+                        release["manifest"]
+                    )
+            for package in catalog["packages"]:
+                for release in package["versions"]:
+                    documents = release_documents[release["path"]]
+                    if documents.changelog is not None:
+                        continue
+                    fallback = loader.fallback_changelog(release["manifest"])
+                    if fallback is not None:
+                        changelog, remainder = fallback
+                        release_documents[release["path"]] = documents._replace(
+                            changelog=changelog,
+                            changelog_remainder=remainder,
+                        )
+        finally:
+            if temporary_cache is not None:
+                temporary_cache.cleanup()
     if output.exists():
         shutil.rmtree(output)
     (output / "assets" / "styles").mkdir(parents=True)
@@ -1801,14 +2500,31 @@ def generate(source: Path, output: Path) -> dict[str, Any]:
         selected = release_for(package, package["selected_version"])
         write_json(output / "crates" / f"{encoded_name}.json", {**shared, "package": package})
         (package_directory / "index.html").write_text(
-            render_detail_page(package, selected, page_kind="package"),
+            render_detail_page(
+                package,
+                selected,
+                page_kind="package",
+                packages=catalog["packages"],
+                documents=release_documents.get(
+                    selected["path"], EMPTY_RELEASE_DOCUMENTS
+                ),
+            ),
             encoding="utf-8",
         )
         for release in package["versions"]:
             version_directory = package_directory / segment(release["version"])
             version_directory.mkdir(parents=True)
+            write_json(version_directory / "manifest.json", release["manifest"])
             (version_directory / "index.html").write_text(
-                render_detail_page(package, release, page_kind="version"),
+                render_detail_page(
+                    package,
+                    release,
+                    page_kind="version",
+                    packages=catalog["packages"],
+                    documents=release_documents.get(
+                        release["path"], EMPTY_RELEASE_DOCUMENTS
+                    ),
+                ),
                 encoding="utf-8",
             )
 
@@ -1830,10 +2546,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "index")
     parser.add_argument("--output", type=Path, default=ROOT / "build" / "site")
+    parser.add_argument(
+        "--skip-source-documents",
+        action="store_true",
+        help="do not fetch and render pinned README and CHANGELOG files",
+    )
+    parser.add_argument(
+        "--source-cache",
+        type=Path,
+        help="reuse bare source-repository clones from this directory",
+    )
     args = parser.parse_args()
     try:
-        catalog = generate(args.source.resolve(), args.output.resolve())
-    except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
+        catalog = generate(
+            args.source.resolve(),
+            args.output.resolve(),
+            include_source_documents=not args.skip_source_documents,
+            source_cache=args.source_cache.resolve() if args.source_cache else None,
+        )
+    except (OSError, RuntimeError, tomllib.TOMLDecodeError, ValueError) as error:
         print(f"site generation failed: {error}", file=sys.stderr)
         return 1
     versions = sum(len(package["versions"]) for package in catalog["packages"])

@@ -17,6 +17,11 @@ if ! "$python_bin" -c 'import tomllib' 2>/dev/null; then
   exit 2
 fi
 
+if ! "$python_bin" -c 'import markdown_it' 2>/dev/null; then
+  printf 'markdown-it-py is unavailable; install requirements-site.txt\n' >&2
+  exit 2
+fi
+
 "$python_bin" "$repo_root/scripts/generate-site.py" --output "$site_dir"
 node "$website_kit/scripts/install-assets.mjs" "$site_dir"
 node "$website_kit/scripts/check-site.mjs" "$site_dir"

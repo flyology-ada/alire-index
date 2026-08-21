@@ -23,10 +23,11 @@ The site is generated from the TOML manifests on every push to `main`; it does
 not maintain a separate package inventory.
 
 Machine-readable data is available as an aggregate catalog and as one file per
-package:
+package, plus a direct manifest object for each version:
 
 - `https://crates.flyology.org/crates.json`
 - `https://crates.flyology.org/crates/<package-name>.json`
+- `https://crates.flyology.org/crates/<package-name>/<version>/manifest.json`
 
 LLM-oriented catalog discovery is available at
 `https://crates.flyology.org/llms.txt`.
@@ -46,8 +47,15 @@ Human-readable routes include:
 
 The package page selects the newest published version. If a crate has only
 `-dev` manifests, it selects the newest development version and identifies the
-crate as development-only. The homepage includes a bounded digest of recent
-index activity. The changes page derives its detailed publication and
+crate as development-only. Full crate and version pages also render the nearest
+`README.md` found from the manifest origin's `subdir` upward, at the exact
+indexed commit. If the same search finds a `CHANGELOG.md`, the section headed
+by that page's exact version is rendered as release notes, with the remaining
+entries that follow it available through a **See more** disclosure. If an older
+pinned commit predates the changelog, the generator looks for that exact
+version in other indexed commits from the same repository and `subdir` path.
+Relative documentation links and images remain pinned to the source commit used. The
+homepage includes a bounded digest of recent index activity. The changes page derives its detailed publication and
 development-update history from Git, including source revision and dependency
 changes, so the Pages checkout retains full repository history.
 GitHub Pages serves JSON with `Access-Control-Allow-Origin: *`, so browser
@@ -59,11 +67,15 @@ Build and check the site locally with a checkout of
 [`flyology-ada/website-kit`](https://github.com/flyology-ada/website-kit):
 
 ```sh
+python3 -m pip install -r requirements-site.txt
 WEBSITE_KIT_DIR=../website-kit ./scripts/build-site.sh
 ```
 
 The generator requires Python 3.11 or newer. Set `PYTHON` if the modern Python
-executable is not the first `python3` on your path.
+executable is not the first `python3` on your path. Site generation fetches the
+pinned source repositories; pass `--source-cache <directory>` directly to
+`scripts/generate-site.py` to reuse its bare clones, or
+`--skip-source-documents` for an intentionally offline metadata-only build.
 
 The repository's Pages settings must use **GitHub Actions** as the source and
 set `crates.flyology.org` as the custom domain. With an Actions publishing
