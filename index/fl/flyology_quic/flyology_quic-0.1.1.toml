@@ -1,0 +1,23 @@
+name = "flyology_quic"
+description = "Ada-native QUIC transport for Flyology tasks"
+version = "0.1.1"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://http.flyology.org/"
+tags = ["ada", "quic", "transport", "udp"]
+project-files = ["flyology_quic.gpr"]
+
+[[depends-on]]
+flyology = "~0.1.0"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "ffe9cb00bcc6788f8556d50b7d1d01e63c6ef730"
+subdir = "flyology_quic"
+url = "git+https://github.com/flyology-ada/flyology-http.git"
