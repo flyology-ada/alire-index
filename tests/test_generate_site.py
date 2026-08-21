@@ -346,20 +346,21 @@ class GenerateSiteTests(unittest.TestCase):
             ),
             [("gnat_flyology_native", "16.2.0-patchset.1.1.0"), ("gnat", "16.2.0")],
         )
-        #  flyology_simd pins gnat 16.1.0, so only the 16.1.0 patchsets qualify.
+        #  flyology 0.1.0 accepts every indexed GNAT major, so each provided
+        #  compiler identity qualifies independently of the toolchain crate's
+        #  own patchset version.
         for release in toolchain["versions"]:
-            simd = next(
+            flyology = next(
                 record
                 for record in release["dependants"]
-                if record["name"] == "flyology_simd"
+                if record["name"] == "flyology"
+                and record["version"] == "0.1.0"
             )
-            self.assertEqual(simd["requires"], "gnat")
-            self.assertEqual(simd["requirement"], "16.1.0")
+            self.assertEqual(flyology["requires"], "gnat")
+            self.assertEqual(flyology["requirement"], ">=13 & <17")
+            self.assertTrue(flyology["qualifies"])
             self.assertEqual(
-                simd["qualifies"], release["version"].startswith("16.1.0")
-            )
-            self.assertEqual(
-                simd["provided_version"], release["version"].partition("-")[0]
+                flyology["provided_version"], release["version"].partition("-")[0]
             )
 
     def test_dependants_qualify_against_the_version_on_the_page(self) -> None:
@@ -407,10 +408,18 @@ class GenerateSiteTests(unittest.TestCase):
         version = (
             self.output / "crates" / "gnat_flyology_native" / "16.2.0-patchset.1.1.0" / "index.html"
         ).read_text(encoding="utf-8")
+        flyology = next(
+            package
+            for package in self.catalog["packages"]
+            if package["name"] == "flyology"
+        )
+        selected = generate_site.release_for(flyology, flyology["selected_version"])
+        qualifying = sum(record["qualifies"] for record in selected["dependants"])
 
         self.assertEqual(home.count(">Dependants</h4>"), len(self.catalog["packages"]))
         self.assertIn(
-            'Resolved against <code>flyology 0.1.0</code> — 3 of 6 dependant releases qualify.',
+            f'Resolved against <code>flyology 0.1.0</code> — {qualifying} of '
+            f'{len(selected["dependants"])} dependant releases qualify.',
             crate,
         )
         self.assertIn(
@@ -426,8 +435,11 @@ class GenerateSiteTests(unittest.TestCase):
         )
         #  A provided identity names the crate it stands in for.
         self.assertIn('Resolved against <code>gnat 16.2.0</code>', version)
-        self.assertIn('<code>gnat 16.1.0</code><span class="dependant-verdict">Excluded</span>', version)
-        self.assertIn('<code>gnat &gt;=13 &amp; &lt;17</code>', version)
+        self.assertIn(
+            '<code>gnat &gt;=13 &amp; &lt;17</code>'
+            '<span class="dependant-verdict">Qualifies</span>',
+            version,
+        )
 
     def test_crates_without_dependants_say_so(self) -> None:
         page = (self.output / "crates" / "flyology_http" / "index.html").read_text(encoding="utf-8")
