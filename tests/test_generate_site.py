@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import importlib.util
 import json
 import re
@@ -415,6 +416,11 @@ class GenerateSiteTests(unittest.TestCase):
         )
         selected = generate_site.release_for(flyology, flyology["selected_version"])
         qualifying = sum(record["qualifies"] for record in selected["dependants"])
+        selected_http = next(
+            record
+            for record in selected["dependants"]
+            if record["name"] == "flyology_http" and record["selected"]
+        )
 
         self.assertEqual(home.count(">Dependants</h4>"), len(self.catalog["packages"]))
         self.assertIn(
@@ -423,9 +429,11 @@ class GenerateSiteTests(unittest.TestCase):
             crate,
         )
         self.assertIn(
-            '<a href="../../crates/flyology_http/0.1.0/"><strong>0.1.0</strong>'
+            f'<a href="../../crates/flyology_http/{selected_http["version"]}/">'
+            f'<strong>{selected_http["version"]}</strong>'
             '<span class="visually-hidden"> (selected version)</span></a>'
-            '<code>~0.1.0</code><span class="dependant-verdict">Qualifies</span>',
+            f'<code>{html.escape(selected_http["requirement"])}</code>'
+            '<span class="dependant-verdict">Qualifies</span>',
             crate,
         )
         self.assertIn(
