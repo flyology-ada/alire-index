@@ -55,8 +55,9 @@ architecture. The cross-catalog action is an outlined, direction-marked switch
 rather than an ordinary peer navigation label. Each closed
 disclosure shows the crate name, selected release, description, and status. Its
 open state uses the same composition as a dedicated crate page: structured
-metadata in the main column and indexed versions, dependencies, dependants,
-and manifest JSON in the right rail. Dedicated crate and version routes render
+metadata in the main column and indexed versions, dependencies, a compact
+dependant count, and manifest JSON in the right rail. Dedicated crate and
+version routes render
 the complete release without duplicating every manifest on the front page.
 
 ## Components
@@ -74,7 +75,9 @@ the complete release without duplicating every manifest on the front page.
   dependencies, and Git history. Comparative distributions use labeled bars,
   monthly activity uses a compact column chart, and exact values remain visible
   without relying on hover, scripting, or color.
-- Dependant lists group by crate on a tonal surface, newest version first.
+- Complete dependant lists live on a separate per-version route so large
+  toolchain relationship sets do not dominate catalog results or browser find.
+  The list groups by crate on a tonal surface, newest version first.
   The dependant's own selected version is bold, and each row ends with a
   verdict in a right-aligned rail so qualification scans vertically. The
   verdict is carried by its wording, not by colour alone.
@@ -89,8 +92,8 @@ the complete release without duplicating every manifest on the front page.
   repeating it or showing newer entries above it. A compact source-document
   rail identifies both materials. Markdown stays within a 74-character reading
   measure and is separated by rules rather than nested in decorative cards.
-- Full crate pages keep indexed versions, dependencies, dependants, and the
-  direct manifest JSON download together in a right-hand information rail.
+- Full crate pages keep indexed versions, dependencies, a link to dependants,
+  and the direct manifest JSON download together in a right-hand information rail.
   The main release column promotes project links and source provenance, then
   presents package metadata without repeating the complete JSON inline.
   Repository revisions link to the exact supported forge tree and conditional
@@ -104,6 +107,10 @@ the complete release without duplicating every manifest on the front page.
   dependant version.
   Dependant group names link to that crate's highest qualifying release, or
   its highest listed release when the current version qualifies none of them.
+- Community crate pages link to Alire Crates CI. Detail pages fetch the small
+  per-crate badge JSON at runtime to show its current aggregate result; the
+  external report link remains usable when scripting or the request is
+  unavailable.
 
 ## Responsive and accessible behavior
 

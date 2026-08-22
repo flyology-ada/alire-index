@@ -1656,6 +1656,38 @@ def manifest_resource_links(
     )
 
 
+def crate_ci_link(
+    package_name: str,
+    *,
+    current_catalog: str,
+    css_class: str | None = None,
+    live_status: bool = False,
+) -> str:
+    """Link community crates to their external Alire CI result page."""
+    if current_catalog != "community":
+        return ""
+    class_attribute = (
+        f' class="{html.escape(css_class, quote=True)}"' if css_class else ""
+    )
+    href = f"https://alire-crate-ci.ada.dev/crates/{segment(package_name)}.html"
+    status_attributes = ""
+    label = "Community CI results"
+    if live_status:
+        badge = f"https://alire-crate-ci.ada.dev/badges/{segment(package_name)}.json"
+        status_attributes = (
+            f' data-crate-ci data-crate-ci-url="{html.escape(badge, quote=True)}"'
+        )
+        label = (
+            '<span>Community CI</span>'
+            '<span class="crate-ci-status" data-crate-ci-status '
+            'aria-live="polite">Results</span>'
+        )
+    return (
+        f'<a{class_attribute}{status_attributes} '
+        f'href="{html.escape(href, quote=True)}">{label}</a>'
+    )
+
+
 def matching_dependency_release(
     packages: list[dict[str, Any]], required: str, requirement: str
 ) -> tuple[dict[str, Any], dict[str, Any], str] | None:
@@ -1885,6 +1917,21 @@ def dependant_rows(
     return (
         f'<p class="quiet dependant-summary">{summary}</p>'
         f'<ul class="dependant-list">{"".join(groups)}</ul>'
+    )
+
+
+def dependant_link_summary(release: dict[str, Any], href: str) -> str:
+    """Render a compact relationship count without embedding dependant names."""
+    dependants = release["dependants"]
+    if not dependants:
+        return '<p class="quiet">No indexed release depends on this version.</p>'
+    crate_count = len({(record["catalog"], record["name"]) for record in dependants})
+    release_count = counted(len(dependants), "dependant release")
+    crate_total = counted(crate_count, "crate")
+    return (
+        f'<p class="quiet dependant-link-summary">{release_count} across '
+        f'{crate_total}.</p><a class="relationship-link" '
+        f'href="{html.escape(href, quote=True)}">View dependants</a>'
     )
 
 
@@ -2170,6 +2217,14 @@ def render_detail_rail(
     name = package["name"]
     version = release["version"]
     identity = f"{html.escape(name)}-{html.escape(version)}"
+    if context == "home":
+        dependants_href = f"crates/{segment(name)}/{segment(version)}/dependants/"
+    elif context == "package":
+        dependants_href = f"{segment(version)}/dependants/"
+    elif context == "version":
+        dependants_href = "dependants/"
+    else:
+        raise ValueError(f"unknown detail-rail context: {context}")
     return f"""
       <aside class="detail-page-rail" aria-label="Version relationships and downloads">
         {render_version_links(package, context=context, current_version=version, exclude_current=False, title='Indexed versions')}
@@ -2179,7 +2234,7 @@ def render_detail_rail(
         </section>
         <section class="detail-rail-section" aria-labelledby="rail-dependants-{identity}">
           <h3 id="rail-dependants-{identity}">Dependants</h3>
-          {dependant_rows(name, release, root_prefix, current_catalog=current_catalog)}
+          {dependant_link_summary(release, dependants_href)}
         </section>
         <a class="manifest-json-link" href="{html.escape(manifest_href, quote=True)}" download>Complete manifest as JSON</a>
       </aside>"""
@@ -2213,6 +2268,7 @@ def render_package(
           <span class="kind-label">{kind.capitalize()}</span>
           <span class="package-links">
             {manifest_resource_links(manifest)}
+            {crate_ci_link(package['name'], current_catalog=current_catalog)}
             <a href="crates/{name}/">Crate page</a>
             <a href="crates/{name}/{version}/">Version page</a>
             <a href="crates/{name}.json" download>JSON</a>
@@ -3004,6 +3060,7 @@ def render_detail_page(
     <link rel="stylesheet" href="{root_prefix}assets/styles/index.css?v={INDEX_CSS_VERSION}">
     <script src="{root_prefix}assets/scripts/ada-highlight.js"></script>
     <script src="{root_prefix}assets/scripts/site.js"></script>
+    <script src="{root_prefix}assets/scripts/index.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to crate details</a>
@@ -3017,6 +3074,7 @@ def render_detail_page(
         <p>{html.escape(description)}</p>
         <div class="actions">
           {manifest_resource_links(release['manifest'], css_class='button button-secondary')}
+          {crate_ci_link(name, current_catalog=catalog_name, css_class='button button-secondary crate-ci-link', live_status=True)}
           {package_action}
           <a class="button button-secondary" href="{json_href}" download>Download JSON</a>
         </div>
@@ -3026,6 +3084,76 @@ def render_detail_page(
         {render_detail_rail(package, release, context=version_context, root_prefix=root_prefix, manifest_href=manifest_href, current_catalog=catalog_name)}
       </div>
       {render_source_documents(documents, package_name=name, version=version)}
+    </main>
+    {render_detail_footer(root_prefix, package, catalog)}
+  </body>
+</html>
+"""
+
+
+def render_dependants_page(
+    package: dict[str, Any],
+    release: dict[str, Any],
+    catalog: dict[str, Any],
+) -> str:
+    """Render the complete reverse-dependency list away from crate search pages."""
+    root_prefix = "../../../../"
+    name = package["name"]
+    version = release["version"]
+    catalog_name = catalog["catalog"]["name"]
+    catalog_label = (
+        "Community Crates" if catalog_name == "community" else "Flyology Crates"
+    )
+    encoded_name = segment(name)
+    encoded_version = segment(version)
+    canonical = (
+        f"{catalog['canonical_url']}crates/{encoded_name}/{encoded_version}/dependants/"
+    )
+    dependants = release["dependants"]
+    crate_count = len({(record["catalog"], record["name"]) for record in dependants})
+    description = (
+        f"{counted(len(dependants), 'dependant release')} across "
+        f"{counted(crate_count, 'crate')} for {name} {version}."
+        if dependants
+        else f"No indexed release depends on {name} {version}."
+    )
+    breadcrumbs = (
+        f'<a href="{root_prefix}">Index</a><span aria-hidden="true">/</span>'
+        f'<a href="../../">{html.escape(name)}</a><span aria-hidden="true">/</span>'
+        f'<a href="../">{html.escape(version)}</a><span aria-hidden="true">/</span>'
+        '<span aria-current="page">Dependants</span>'
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="{html.escape(description, quote=True)}">
+    <meta name="theme-color" content="#17213d">
+    <title>Dependants of {html.escape(name)} {html.escape(version)} · {catalog_label}</title>
+    <link rel="canonical" href="{canonical}">
+    <link rel="icon" href="{root_prefix}flyology-logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="{root_prefix}assets/styles/site.css">
+    <link rel="stylesheet" href="{root_prefix}assets/styles/index.css?v={INDEX_CSS_VERSION}">
+    <script src="{root_prefix}assets/scripts/ada-highlight.js"></script>
+    <script src="{root_prefix}assets/scripts/site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to dependants</a>
+    {render_detail_header(root_prefix, catalog)}
+    <main class="dependants-page page-shell" id="main">
+      <nav class="breadcrumbs" aria-label="Breadcrumb">{breadcrumbs}</nav>
+      <header class="dependants-hero">
+        <p class="eyebrow">Reverse dependencies</p>
+        <h1>Dependants of {html.escape(name)}.</h1>
+        <div class="crate-release-line"><code>{html.escape(version)}</code>{status_badge(release, development_only=package['development_only'])}</div>
+        <p>{html.escape(description)}</p>
+        <div class="actions"><a class="button button-secondary" href="../">Version details</a></div>
+      </header>
+      <section class="dependants-results" aria-labelledby="dependants-title">
+        <h2 id="dependants-title">Indexed requirements.</h2>
+        {dependant_rows(name, release, root_prefix, current_catalog=catalog_name)}
+      </section>
     </main>
     {render_detail_footer(root_prefix, package, catalog)}
   </body>
@@ -3179,6 +3307,23 @@ INDEX_CSS = r"""
 .detail-rail-section h3 { margin-bottom: .7rem; font-size: .82rem; letter-spacing: -.01em; }
 .detail-page-rail .dependency-row { grid-template-columns: minmax(7rem, .7fr) minmax(0, 1fr); }
 .detail-page-rail .dependant-release { grid-template-columns: minmax(5.5rem, .5fr) minmax(0, 1fr) 4.8rem; gap: .6rem; }
+.dependant-link-summary { margin: 0 0 .45rem; }
+.relationship-link { font-size: .74rem; font-weight: 620; }
+.crate-ci-link { gap: .55rem; }
+.crate-ci-status { padding-left: .55rem; border-left: 1px solid var(--line); color: var(--ink-soft); font: 600 .66rem var(--font-mono); }
+.crate-ci-link[data-ci-state="success"] .crate-ci-status { color: var(--teal-deep); }
+.crate-ci-link[data-ci-state="warning"] .crate-ci-status { color: var(--violet-deep); }
+.crate-ci-link[data-ci-state="error"] .crate-ci-status { color: var(--ink-soft); }
+.dependants-page { padding-bottom: clamp(5rem, 10vw, 8rem); }
+.dependants-hero { max-width: 58rem; padding-block: clamp(4rem, 8vw, 7rem); }
+.dependants-hero h1 { max-width: 18ch; margin-bottom: .7rem; }
+.dependants-hero > p:not(.eyebrow) { max-width: 64ch; color: var(--ink-soft); }
+.dependants-results { max-width: 70rem; padding-top: 2.5rem; border-top: 1px solid var(--line); }
+.dependants-results h2 { margin-bottom: 1.4rem; }
+.dependants-results .dependant-list { gap: .7rem; }
+.dependants-results .dependant-group { padding: .85rem 1rem; }
+.dependants-results .dependant-name { font-size: .86rem; }
+.dependants-results .dependant-release { grid-template-columns: minmax(9rem, .25fr) minmax(0, 1fr) 6rem; font-size: .8rem; }
 .manifest-json-link { display: flex; justify-content: space-between; align-items: center; padding: .8rem .15rem; border-block: 1px solid var(--line); gap: 1rem; font-size: .76rem; font-weight: 620; text-decoration: none; }
 .manifest-json-link::after { content: "↓"; color: var(--ink-soft); font-size: .9rem; }
 .manifest-json-link:hover { background: var(--surface); }
@@ -3408,6 +3553,29 @@ INDEX_JS = r"""
 (function () {
   "use strict";
   document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[data-crate-ci]").forEach(async function (link) {
+      const status = link.querySelector("[data-crate-ci-status]");
+      if (!status) return;
+      try {
+        const response = await fetch(link.dataset.crateCiUrl, {
+          headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) throw new Error("CI status request failed");
+        const result = await response.json();
+        if (result.schemaVersion !== 1 || typeof result.message !== "string") {
+          throw new Error("Unrecognised CI status response");
+        }
+        status.textContent = result.message;
+        link.dataset.ciState = result.color === "green"
+          ? "success"
+          : result.color === "red" ? "error" : "warning";
+        link.setAttribute("aria-label", "Community CI results: " + result.message);
+      } catch (_error) {
+        status.textContent = "Results";
+        link.dataset.ciState = "error";
+      }
+    });
+
     const catalog = document.querySelector("[data-catalog]");
     if (!catalog) return;
     const search = catalog.querySelector("[data-search]");
@@ -3695,6 +3863,13 @@ def write_catalog_site(
                 ),
                 encoding="utf-8",
             )
+            if release["dependants"]:
+                dependants_directory = version_directory / "dependants"
+                dependants_directory.mkdir()
+                (dependants_directory / "index.html").write_text(
+                    render_dependants_page(package, release, catalog),
+                    encoding="utf-8",
+                )
 
     (output / "index.html").write_text(
         render_html(catalog, history), encoding="utf-8"

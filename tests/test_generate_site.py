@@ -368,20 +368,25 @@ class GenerateSiteTests(unittest.TestCase):
             for record in selected["dependants"]
             if record["name"] == "flyology_http"
         )
-        crate_page = (
-            self.output / "crates" / "flyology" / "index.html"
+        dependants_page = (
+            self.output
+            / "crates"
+            / "flyology"
+            / selected["version"]
+            / "dependants"
+            / "index.html"
         ).read_text(encoding="utf-8")
         self.assertIn(
             f'<a class="dependant-name" '
-            f'href="../../crates/flyology_http/{top_http["version"]}/">'
+            f'href="../../../../crates/flyology_http/{top_http["version"]}/">'
             "flyology_http</a>",
-            crate_page,
+            dependants_page,
         )
         self.assertIn(
             '<a class="dependant-name" '
-            'href="../../crates/flyology_postgres/0.1.0/">'
+            'href="../../../../crates/flyology_postgres/0.1.0/">'
             "flyology_postgres</a>",
-            crate_page,
+            dependants_page,
         )
 
     def test_community_shadow_resolves_links_and_records_crate_changes(self) -> None:
@@ -514,6 +519,15 @@ Community **testing details**.
             aunit_page = (
                 output / "community" / "crates" / "aunit" / "1.0.0" / "index.html"
             ).read_text(encoding="utf-8")
+            aunit_dependants = (
+                output
+                / "community"
+                / "crates"
+                / "aunit"
+                / "1.0.0"
+                / "dependants"
+                / "index.html"
+            ).read_text(encoding="utf-8")
             self.assertIn("Recent changes.", community_home)
             self.assertIn("aunit", community_home)
             self.assertIn("New crate", community_changes)
@@ -521,8 +535,15 @@ Community **testing details**.
             self.assertIn("Alire community index", community_stats)
             self.assertIn('href="../../stats/"', community_stats)
             self.assertIn("Not declared", community_stats)
-            self.assertIn('href="../../../../crates/consumer/1.0.0/"', aunit_page)
+            self.assertIn(
+                'href="../../../../../crates/consumer/1.0.0/"',
+                aunit_dependants,
+            )
             self.assertIn("Flyology", aunit_page)
+            self.assertIn(
+                'data-crate-ci-url="https://alire-crate-ci.ada.dev/badges/aunit.json"',
+                aunit_page,
+            )
             self.assertIn("Community <strong>testing details</strong>.", aunit_page)
             self.assertNotIn("<script>", aunit_page)
             self.assertNotIn("alert", aunit_page)
@@ -1078,11 +1099,19 @@ Not release notes.
                     self.assertEqual(set(record), fields)
                     self.assertIsInstance(record["qualifies"], bool)
 
-    def test_pages_render_dependants_with_the_selected_version_in_bold(self) -> None:
+    def test_dependants_are_separate_from_catalog_and_detail_pages(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
         crate = (self.output / "crates" / "flyology" / "index.html").read_text(encoding="utf-8")
-        version = (
-            self.output / "crates" / "gnat_flyology_native" / "16.2.0-patchset.1.1.0" / "index.html"
+        dependants = (
+            self.output / "crates" / "flyology" / "0.1.0" / "dependants" / "index.html"
+        ).read_text(encoding="utf-8")
+        toolchain_dependants = (
+            self.output
+            / "crates"
+            / "gnat_flyology_native"
+            / "16.2.0-patchset.1.1.0"
+            / "dependants"
+            / "index.html"
         ).read_text(encoding="utf-8")
         flyology = next(
             package
@@ -1098,31 +1127,59 @@ Not release notes.
         )
 
         self.assertEqual(home.count(">Dependants</h3>"), len(self.catalog["packages"]))
+        self.assertNotIn('class="dependant-release ', home)
+        self.assertNotIn('class="dependant-release ', crate)
+        self.assertIn('href="0.1.0/dependants/">View dependants</a>', crate)
         self.assertIn(
             f'Resolved against <code>flyology 0.1.0</code> — {qualifying} of '
             f'{len(selected["dependants"])} dependant releases qualify.',
-            crate,
+            dependants,
         )
         self.assertIn(
-            f'<a href="../../crates/flyology_http/{selected_http["version"]}/">'
+            f'<a href="../../../../crates/flyology_http/{selected_http["version"]}/">'
             f'<strong>{selected_http["version"]}</strong>'
             '<span class="visually-hidden"> (selected version)</span></a>'
             f'<code>{html.escape(selected_http["requirement"])}</code>'
             '<span class="dependant-verdict">Qualifies</span>',
-            crate,
+            dependants,
         )
         self.assertIn(
-            '<a href="../../crates/flyology_http/0.1.1-dev/">0.1.1-dev</a>'
+            '<a href="../../../../crates/flyology_http/0.1.1-dev/">0.1.1-dev</a>'
             '<code>~0.1.1-dev</code><span class="dependant-verdict">Excluded</span>',
-            crate,
+            dependants,
         )
         #  A provided identity names the crate it stands in for.
-        self.assertIn('Resolved against <code>gnat 16.2.0</code>', version)
+        self.assertIn(
+            'Resolved against <code>gnat 16.2.0</code>', toolchain_dependants
+        )
         self.assertIn(
             '<code>gnat &gt;=13 &amp; &lt;17</code>'
             '<span class="dependant-verdict">Qualifies</span>',
-            version,
+            toolchain_dependants,
         )
+
+    def test_community_crate_ci_link_supports_live_badge_data(self) -> None:
+        self.assertEqual(
+            generate_site.crate_ci_link(
+                "gnat_native", current_catalog="flyology", live_status=True
+            ),
+            "",
+        )
+        link = generate_site.crate_ci_link(
+            "gnat_native",
+            current_catalog="community",
+            css_class="button",
+            live_status=True,
+        )
+        self.assertIn(
+            'href="https://alire-crate-ci.ada.dev/crates/gnat_native.html"',
+            link,
+        )
+        self.assertIn(
+            'data-crate-ci-url="https://alire-crate-ci.ada.dev/badges/gnat_native.json"',
+            link,
+        )
+        self.assertIn('data-crate-ci-status aria-live="polite">Results</span>', link)
 
     def test_crates_without_dependants_say_so(self) -> None:
         page = (self.output / "crates" / "flyology_http" / "index.html").read_text(encoding="utf-8")
@@ -1134,6 +1191,15 @@ Not release notes.
         selected = generate_site.release_for(package, package["selected_version"])
         self.assertEqual(selected["dependants"], [])
         self.assertIn("No indexed release depends on this version.", page)
+        self.assertFalse(
+            (
+                self.output
+                / "crates"
+                / "flyology_http"
+                / selected["version"]
+                / "dependants"
+            ).exists()
+        )
 
     def test_install_command_has_shell_line_continuations(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")

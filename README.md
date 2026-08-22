@@ -56,6 +56,7 @@ Human-readable routes include:
 
 - `https://crates.flyology.org/crates/<package-name>/`
 - `https://crates.flyology.org/crates/<package-name>/<version>/`
+- `https://crates.flyology.org/crates/<package-name>/<version>/dependants/`
 - `https://crates.flyology.org/changes/`
 - `https://crates.flyology.org/stats/`
 - `https://crates.flyology.org/community/`
@@ -87,6 +88,10 @@ history at `/community/changes/`. Community pages intentionally omit README
 and changelog source cloning: mirroring hundreds of upstream source
 repositories during every site build would make the shadow unreliable, while
 the structured manifests, relationships, provenance, and JSON remain complete.
+Community crate detail pages also link to the corresponding
+[Alire Crates CI](https://alire-crate-ci.ada.dev/) report and load its small
+per-crate badge summary in the browser. The external report link remains the
+fallback if JavaScript or the status request is unavailable.
 Each catalog also has a statistics page derived at build time. It reports
 license declarations and package composition from selected releases, release
 status, dependency resolution, and Git-derived age, monthly activity,
