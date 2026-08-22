@@ -156,10 +156,16 @@ class GenerateSiteTests(unittest.TestCase):
 
     def test_header_distinguishes_the_cross_catalog_switch(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
+        styles = (self.output / "assets" / "styles" / "index.css").read_text(encoding="utf-8")
         self.assertIn(
-            'class="catalog-switch" href="./community/"><span>Community index</span>',
+            'class="catalog-switch-item"><a class="catalog-switch" href="./community/">'
+            '<span class="catalog-switch-copy"><span class="catalog-switch-kicker">'
+            'Switch catalog</span><span>Community index</span></span>',
             home,
         )
+        self.assertIn("border-radius: var(--radius-sm)", styles)
+        self.assertIn(".nav-links a.catalog-switch::after { display: none; }", styles)
+        self.assertIn(".catalog-switch-kicker { display: block", styles)
 
     def test_home_page_has_a_bounded_change_preview(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")

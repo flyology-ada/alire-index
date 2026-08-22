@@ -2500,7 +2500,7 @@ def render_site_header(
           <li><a href="{root_prefix}#catalog"{package_current}>Packages</a></li>
           <li><a href="{root_prefix}changes/"{changes_current}>Changes</a></li>
           <li><a href="{root_prefix}stats/"{stats_current}>Stats</a></li>
-          <li><a class="catalog-switch" href="{other_catalog_href(root_prefix, catalog_name)}"><span>{other_label}</span><span aria-hidden="true">↗</span></a></li>
+          <li class="catalog-switch-item"><a class="catalog-switch" href="{other_catalog_href(root_prefix, catalog_name)}"><span class="catalog-switch-copy"><span class="catalog-switch-kicker">Switch catalog</span><span>{other_label}</span></span><span class="catalog-switch-arrow" aria-hidden="true">↗</span></a></li>
           <li><a href="{root_prefix}crates.json" download>JSON</a></li>
           <li><a href="{repository_url}">GitHub</a></li>
         </ul>
@@ -3250,9 +3250,12 @@ INDEX_CSS = r"""
 .expand-button:hover { background: var(--surface-strong); }
 .result-count { margin: 1rem 0; color: var(--ink-soft); font: .74rem var(--font-mono); }
 .package-list { border-top: 1px solid var(--line); }
-.nav-links a.catalog-switch { display: inline-flex; align-items: center; padding: .38rem .68rem; border: 1px solid var(--line); border-radius: 999px; gap: .45rem; background: var(--surface); color: var(--ink); line-height: 1; text-decoration: none; }
+.nav-links a.catalog-switch { display: inline-grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-height: 2.35rem; padding: .45rem .65rem; border: 1px solid var(--line); border-radius: var(--radius-sm); gap: .55rem; background: var(--surface); color: var(--ink); line-height: 1.1; text-decoration: none; transition: background-color 180ms var(--ease-out), border-color 180ms var(--ease-out), color 180ms var(--ease-out); }
+.nav-links a.catalog-switch::after { display: none; }
 .nav-links a.catalog-switch:hover { border-color: var(--violet); background: var(--surface-strong); color: var(--violet-deep); }
-.catalog-switch span:last-child { color: var(--violet-deep); font-size: .7em; }
+.catalog-switch-copy { min-width: 0; }
+.catalog-switch-kicker { display: none; }
+.catalog-switch-arrow { color: var(--violet-deep); font-size: .7em; }
 .package { border-bottom: 1px solid var(--line); }
 .package[hidden] { display: none; }
 .package-summary { display: grid; grid-template-columns: minmax(13rem, .72fr) minmax(16rem, 1.2fr) auto; align-items: center; min-height: 7.2rem; padding: 1.2rem .25rem; gap: 1.4rem; cursor: pointer; list-style: none; transition: background-color 180ms var(--ease-out), padding 180ms var(--ease-out); }
@@ -3525,6 +3528,12 @@ INDEX_CSS = r"""
 .empty-state h3 { margin-bottom: .5rem; }
 .empty-state p { color: var(--ink-soft); }
 @media (max-width: 900px) {
+  .catalog-switch-item { margin-block: .55rem .3rem; }
+  .nav-links a.catalog-switch { width: 100%; min-height: 4.5rem; padding: .7rem .85rem; line-height: 1.2; }
+  .catalog-switch-copy { display: grid; gap: .12rem; }
+  .catalog-switch-kicker { display: block; color: var(--ink-soft); font: 650 .58rem var(--font-sans); letter-spacing: .07em; text-transform: uppercase; }
+  .catalog-switch-copy > span:last-child { font-size: .9rem; font-weight: 620; }
+  .catalog-switch-arrow { font-size: .8rem; }
   .catalog-hero { grid-template-columns: 1fr; min-height: 0; }
   .install-panel { max-width: 38rem; }
   .catalog-heading { grid-template-columns: 1fr; gap: 1.2rem; }
