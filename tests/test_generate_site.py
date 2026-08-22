@@ -194,7 +194,7 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn("License declarations.", page)
         self.assertIn("Freshness and active packages.", page)
         self.assertIn("Dependency reach.", page)
-        self.assertIn("Most dependent packages", page)
+        self.assertIn("Most depended-on packages", page)
         self.assertIn('href="../community/stats/"', page)
         self.assertEqual(len(stats["monthly_activity"]), 12)
         self.assertEqual(stats["packages"], len(self.catalog["packages"]))
@@ -206,22 +206,38 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertTrue(stats["latest_activity"])
         self.assertGreater(sum(item["count"] for item in stats["licenses"]), 0)
         self.assertEqual(
-            stats["dependent_packages"],
-            generate_site.most_dependent_packages(self.catalog["packages"]),
+            stats["depended_on_packages"],
+            generate_site.most_depended_on_packages(self.catalog["packages"]),
         )
-        for package in stats["dependent_packages"]:
+        for package in stats["depended_on_packages"]:
             self.assertIn(
                 f'href="../crates/{generate_site.segment(package["name"])}/"', page
             )
 
-    def test_most_dependent_packages_excludes_toolchains(self) -> None:
+    def test_most_depended_on_packages_counts_distinct_selected_crates(self) -> None:
+        def dependant(
+            name: str,
+            *,
+            catalog: str = "flyology",
+            selected: bool = True,
+            qualifies: bool | None = True,
+        ) -> dict[str, object]:
+            return {
+                "catalog": catalog,
+                "name": name,
+                "selected": selected,
+                "qualifies": qualifies,
+            }
+
         def package(
-            name: str, dependency_count: int, manifest: dict[str, object]
+            name: str,
+            dependants: list[dict[str, object]],
+            manifest: dict[str, object],
         ) -> dict[str, object]:
             release = {
                 "version": "1.0.0",
                 "manifest": manifest,
-                "dependencies": [{}] * dependency_count,
+                "dependants": dependants,
             }
             return {
                 "name": name,
@@ -230,14 +246,29 @@ class GenerateSiteTests(unittest.TestCase):
             }
 
         packages = [
-            package("toolchain", 10, {"provides": ["gnat=1.0.0"]}),
-            package("application", 3, {}),
-            package("library", 1, {}),
-            package("standalone", 0, {}),
+            package(
+                "toolchain",
+                [dependant(f"toolchain_user_{index}") for index in range(10)],
+                {"provides": ["gnat=1.0.0"]},
+            ),
+            package(
+                "application",
+                [
+                    dependant("first"),
+                    dependant("first"),
+                    dependant("second"),
+                    dependant("third", catalog="community"),
+                    dependant("old_release", selected=False),
+                    dependant("excluded", qualifies=False),
+                ],
+                {},
+            ),
+            package("library", [dependant("application")], {}),
+            package("standalone", [], {}),
         ]
 
         self.assertEqual(
-            generate_site.most_dependent_packages(packages),
+            generate_site.most_depended_on_packages(packages),
             [
                 {"name": "application", "count": 3},
                 {"name": "library", "count": 1},

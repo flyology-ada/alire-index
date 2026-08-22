@@ -1292,20 +1292,26 @@ def duration_label(days: int | None) -> str:
     )
 
 
-def most_dependent_packages(
+def most_depended_on_packages(
     packages: list[dict[str, Any]], *, limit: int = 8
 ) -> list[dict[str, Any]]:
-    """Rank non-toolchain packages by selected-release dependency count."""
-    dependent_packages = []
+    """Rank non-toolchain packages by distinct qualifying selected dependants."""
+    depended_on_packages = []
     for package in packages:
         selected = release_for(package, package["selected_version"])
         if package_kind(selected["manifest"]) == "toolchain":
             continue
-        count = len(selected.get("dependencies", []))
+        count = len(
+            {
+                (record["catalog"], record["name"])
+                for record in selected.get("dependants", [])
+                if record["selected"] and record["qualifies"] is not False
+            }
+        )
         if count:
-            dependent_packages.append({"name": package["name"], "count": count})
+            depended_on_packages.append({"name": package["name"], "count": count})
     return sorted(
-        dependent_packages,
+        depended_on_packages,
         key=lambda item: (-item["count"], item["name"].lower(), item["name"]),
     )[:limit]
 
@@ -1454,7 +1460,7 @@ def load_catalog_statistics(
             "resolved": sum(dependency.get("resolved", False) for dependency in dependencies),
             "cross_catalog": cross_catalog_dependencies,
         },
-        "dependent_packages": most_dependent_packages(packages),
+        "depended_on_packages": most_depended_on_packages(packages),
         "active_packages": active_packages,
     }
 
@@ -2731,15 +2737,15 @@ def render_stats_page(catalog: dict[str, Any], stats: dict[str, Any]) -> str:
         if active_rows
         else '<p class="stats-unavailable">Git history was unavailable when this site was generated.</p>'
     )
-    dependent_rows = [
+    depended_on_rows = [
         f'<tr><th scope="row"><a href="../crates/{segment(package["name"])}/">{html.escape(package["name"])}</a></th>'
         f'<td>{package["count"]}</td></tr>'
-        for package in stats["dependent_packages"]
+        for package in stats["depended_on_packages"]
     ]
-    dependent_table = (
-        f'<div class="stats-table-wrap"><table class="ranked-packages"><thead><tr><th scope="col">Package</th><th scope="col">Dependencies</th></tr></thead><tbody>{"".join(dependent_rows)}</tbody></table></div>'
-        if dependent_rows
-        else '<p class="stats-unavailable">No package dependencies are declared.</p>'
+    depended_on_table = (
+        f'<div class="stats-table-wrap"><table class="ranked-packages"><thead><tr><th scope="col">Package</th><th scope="col">Dependant crates</th></tr></thead><tbody>{"".join(depended_on_rows)}</tbody></table></div>'
+        if depended_on_rows
+        else '<p class="stats-unavailable">No other selected crates depend on these packages.</p>'
     )
     other_label = "Flyology stats" if is_community else "Community stats"
     return f"""<!doctype html>
@@ -2816,9 +2822,9 @@ def render_stats_page(catalog: dict[str, Any], stats: dict[str, Any]) -> str:
           <div><dt>Resolved across indexes</dt><dd>{dependency_stats['cross_catalog']}</dd></div>
         </dl>
         <div class="dependency-ranking">
-          <h3>Most dependent packages</h3>
-          <p>Non-toolchain selected releases with the most declared dependencies.</p>
-          {dependent_table}
+          <h3>Most depended-on packages</h3>
+          <p>Non-toolchain selected releases with the most qualifying dependant crates.</p>
+          {depended_on_table}
         </div>
       </section>
 
