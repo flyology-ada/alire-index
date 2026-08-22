@@ -194,6 +194,7 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn("License declarations.", page)
         self.assertIn("Freshness and active packages.", page)
         self.assertIn("Dependency reach.", page)
+        self.assertIn("Most dependent packages", page)
         self.assertIn('href="../community/stats/"', page)
         self.assertEqual(len(stats["monthly_activity"]), 12)
         self.assertEqual(stats["packages"], len(self.catalog["packages"]))
@@ -204,6 +205,44 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertTrue(stats["first_activity"])
         self.assertTrue(stats["latest_activity"])
         self.assertGreater(sum(item["count"] for item in stats["licenses"]), 0)
+        self.assertEqual(
+            stats["dependent_packages"],
+            generate_site.most_dependent_packages(self.catalog["packages"]),
+        )
+        for package in stats["dependent_packages"]:
+            self.assertIn(
+                f'href="../crates/{generate_site.segment(package["name"])}/"', page
+            )
+
+    def test_most_dependent_packages_excludes_toolchains(self) -> None:
+        def package(
+            name: str, dependency_count: int, manifest: dict[str, object]
+        ) -> dict[str, object]:
+            release = {
+                "version": "1.0.0",
+                "manifest": manifest,
+                "dependencies": [{}] * dependency_count,
+            }
+            return {
+                "name": name,
+                "selected_version": "1.0.0",
+                "versions": [release],
+            }
+
+        packages = [
+            package("toolchain", 10, {"provides": ["gnat=1.0.0"]}),
+            package("application", 3, {}),
+            package("library", 1, {}),
+            package("standalone", 0, {}),
+        ]
+
+        self.assertEqual(
+            generate_site.most_dependent_packages(packages),
+            [
+                {"name": "application", "count": 3},
+                {"name": "library", "count": 1},
+            ],
+        )
 
     def test_change_entry_distinguishes_publication_and_dev_update(self) -> None:
         before = {

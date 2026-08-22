@@ -1292,6 +1292,24 @@ def duration_label(days: int | None) -> str:
     )
 
 
+def most_dependent_packages(
+    packages: list[dict[str, Any]], *, limit: int = 8
+) -> list[dict[str, Any]]:
+    """Rank non-toolchain packages by selected-release dependency count."""
+    dependent_packages = []
+    for package in packages:
+        selected = release_for(package, package["selected_version"])
+        if package_kind(selected["manifest"]) == "toolchain":
+            continue
+        count = len(selected.get("dependencies", []))
+        if count:
+            dependent_packages.append({"name": package["name"], "count": count})
+    return sorted(
+        dependent_packages,
+        key=lambda item: (-item["count"], item["name"].lower(), item["name"]),
+    )[:limit]
+
+
 def load_catalog_statistics(
     catalog: dict[str, Any], repository: Path, source: Path
 ) -> dict[str, Any]:
@@ -1436,6 +1454,7 @@ def load_catalog_statistics(
             "resolved": sum(dependency.get("resolved", False) for dependency in dependencies),
             "cross_catalog": cross_catalog_dependencies,
         },
+        "dependent_packages": most_dependent_packages(packages),
         "active_packages": active_packages,
     }
 
@@ -2712,6 +2731,16 @@ def render_stats_page(catalog: dict[str, Any], stats: dict[str, Any]) -> str:
         if active_rows
         else '<p class="stats-unavailable">Git history was unavailable when this site was generated.</p>'
     )
+    dependent_rows = [
+        f'<tr><th scope="row"><a href="../crates/{segment(package["name"])}/">{html.escape(package["name"])}</a></th>'
+        f'<td>{package["count"]}</td></tr>'
+        for package in stats["dependent_packages"]
+    ]
+    dependent_table = (
+        f'<div class="stats-table-wrap"><table class="ranked-packages"><thead><tr><th scope="col">Package</th><th scope="col">Dependencies</th></tr></thead><tbody>{"".join(dependent_rows)}</tbody></table></div>'
+        if dependent_rows
+        else '<p class="stats-unavailable">No package dependencies are declared.</p>'
+    )
     other_label = "Flyology stats" if is_community else "Community stats"
     return f"""<!doctype html>
 <html lang="en">
@@ -2786,6 +2815,11 @@ def render_stats_page(catalog: dict[str, Any], stats: dict[str, Any]) -> str:
           <div><dt>Resolved</dt><dd>{dependency_stats['resolved']} <span>{resolved_percentage:.0f}%</span></dd></div>
           <div><dt>Resolved across indexes</dt><dd>{dependency_stats['cross_catalog']}</dd></div>
         </dl>
+        <div class="dependency-ranking">
+          <h3>Most dependent packages</h3>
+          <p>Non-toolchain selected releases with the most declared dependencies.</p>
+          {dependent_table}
+        </div>
       </section>
 
       <aside class="stats-method" aria-labelledby="method-title">
@@ -3428,11 +3462,11 @@ INDEX_CSS = r"""
 .release-key { width: .55rem; height: .55rem; }
 .maintenance-layout { display: grid; grid-template-columns: minmax(15rem, .68fr) minmax(24rem, 1fr); align-items: start; gap: clamp(3rem, 8vw, 7rem); }
 .stats-table-wrap { overflow-x: auto; }
-.active-packages { width: 100%; border-collapse: collapse; font-size: .72rem; }
-.active-packages th, .active-packages td { padding: .72rem .2rem; border-bottom: 1px solid var(--line); text-align: left; }
-.active-packages thead th { color: var(--ink-soft); font-size: .62rem; font-weight: 500; }
-.active-packages tbody th { font-weight: 620; }
-.active-packages td { color: var(--ink-soft); font-family: var(--font-mono); }
+.active-packages, .ranked-packages { width: 100%; border-collapse: collapse; font-size: .72rem; }
+.active-packages th, .active-packages td, .ranked-packages th, .ranked-packages td { padding: .72rem .2rem; border-bottom: 1px solid var(--line); text-align: left; }
+.active-packages thead th, .ranked-packages thead th { color: var(--ink-soft); font-size: .62rem; font-weight: 500; }
+.active-packages tbody th, .ranked-packages tbody th { font-weight: 620; }
+.active-packages td, .ranked-packages td { color: var(--ink-soft); font-family: var(--font-mono); }
 .active-packages th:nth-child(2), .active-packages td:nth-child(2) { text-align: center; }
 .active-packages th:last-child, .active-packages td:last-child { text-align: right; white-space: nowrap; }
 .dependency-summary { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; border-block: 1px solid var(--line); }
@@ -3442,6 +3476,10 @@ INDEX_CSS = r"""
 .dependency-summary dt { color: var(--ink-soft); font-size: .7rem; }
 .dependency-summary dd { margin: .22rem 0 0; font: 620 1.15rem var(--font-mono); }
 .dependency-summary dd span { color: var(--ink-soft); font-size: .65em; font-weight: 400; }
+.dependency-ranking { max-width: 38rem; margin-top: 3rem; }
+.dependency-ranking h3 { margin-bottom: .35rem; font-size: .78rem; }
+.dependency-ranking > p { margin: 0 0 1rem; color: var(--ink-soft); font-size: .72rem; }
+.ranked-packages th:last-child, .ranked-packages td:last-child { text-align: right; }
 .stats-method { display: grid; grid-template-columns: minmax(11rem, .32fr) minmax(0, 1fr) auto; align-items: start; padding-block: 2.2rem; gap: 2rem; }
 .stats-method h2 { margin: 0; font-size: .85rem; }
 .stats-method p { max-width: 68ch; margin: 0; color: var(--ink-soft); font-size: .76rem; }
