@@ -21,5 +21,5 @@ release.optimization = "Performance"
 release.compile_checks = "Warnings"
 
 [origin]
-commit = "e45e0282b5e303151d73840d2bc0c25966e2857d"
+commit = "f7e544e9662a9f580540a6a1124e6c8c30c67721"
 url = "git+https://github.com/flyology-ada/flyology-simd.git"
