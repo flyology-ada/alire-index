@@ -18,6 +18,6 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "243833e635b2fc4f990d86d32624c4f1b7e9951d"
+commit = "810f1088c2d5a35975e7722c4dd619136a913ecd"
 subdir = "flyology_bench"
 url = "git+https://github.com/flyology-ada/flyology.git"
