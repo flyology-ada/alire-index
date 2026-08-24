@@ -25,6 +25,6 @@ type = "test"
 command = ["./scripts/test.sh"]
 
 [origin]
-commit = "417e48ad4ad699cf203f15e780e55998f5760094"
+commit = "243833e635b2fc4f990d86d32624c4f1b7e9951d"
 subdir = "flyology_cachelines"
 url = "git+https://github.com/flyology-ada/flyology.git"
