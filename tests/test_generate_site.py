@@ -442,7 +442,7 @@ class GenerateSiteTests(unittest.TestCase):
         top_http = next(
             record
             for record in selected["dependants"]
-            if record["name"] == "flyology_http"
+            if record["name"] == "flyology_http" and record["qualifies"]
         )
         dependants_page = (
             self.output
