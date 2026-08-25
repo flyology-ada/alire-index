@@ -1258,20 +1258,31 @@ Not release notes.
         self.assertIn('data-crate-ci-status aria-live="polite">Results</span>', link)
 
     def test_crates_without_dependants_say_so(self) -> None:
-        page = (self.output / "crates" / "flyology_http" / "index.html").read_text(encoding="utf-8")
-        package = next(
-            candidate
+        package, selected = next(
+            (candidate, release)
             for candidate in self.catalog["packages"]
-            if candidate["name"] == "flyology_http"
+            for release in [
+                generate_site.release_for(
+                    candidate, candidate["selected_version"]
+                )
+            ]
+            if not release["dependants"]
         )
-        selected = generate_site.release_for(package, package["selected_version"])
+        page = (
+            self.output
+            / "crates"
+            / generate_site.path_segment(package["name"])
+            / "index.html"
+        ).read_text(
+            encoding="utf-8"
+        )
         self.assertEqual(selected["dependants"], [])
         self.assertIn("No indexed release depends on this version.", page)
         self.assertFalse(
             (
                 self.output
                 / "crates"
-                / "flyology_http"
+                / generate_site.path_segment(package["name"])
                 / selected["version"]
                 / "dependants"
             ).exists()
