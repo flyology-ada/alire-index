@@ -1,0 +1,32 @@
+name = "flyology_object_storage"
+description = "S3 client and pluggable object-storage server for Flyology"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://github.com/flyology-ada/flyology-object-storage"
+project-files = ["flyology_object_storage.gpr"]
+tags = ["ada", "s3", "aws", "object-storage", "client", "server"]
+
+[[depends-on]]
+flyology_http = "=0.1.3-dev"
+
+[build-switches]
+"*".ada_version = "Ada2022"
+development.optimization = "Debug"
+development.compile_checks = "Errors"
+release.optimization = "Performance"
+release.compile_checks = "Warnings"
+
+[[actions]]
+type = "test"
+command = ["./tests/scripts/test.sh"]
+
+[[depends-on]]
+xmlada = "^26.0.0"
+
+[origin]
+commit = "0761f9e26da279693f2615093aa91c07029c32ed"
+url = "git+https://github.com/flyology-ada/flyology-object-storage.git"
