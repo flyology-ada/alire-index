@@ -1,0 +1,24 @@
+name = "flyology_json"
+description = "Incremental bounded JSON parsing and writing for Ada"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://json.flyology.org"
+tags = ["ada", "json", "streaming", "parser", "writer"]
+
+[[depends-on]]
+gnat = ">=13 & <17"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test-all.sh"]
+
+[build-switches]
+"*" = { Compile_Checks = "warnings" }
+
+[origin]
+commit = "f8a4a0331a03552733e7bd8531552ba0c21f8997"
+url = "git+https://github.com/flyology-ada/flyology-json.git"
