@@ -20,7 +20,6 @@ gnat = ">=13 & <17"
 [[depends-on]]
 flyology_json = "=0.1.0-dev"
 
-
 [[actions]]
 type = "test"
 command = ["./scripts/test.sh"]
@@ -29,5 +28,5 @@ command = ["./scripts/test.sh"]
 "*" = { Compile_Checks = "warnings" }
 
 [origin]
-commit = "ffc459bc07f80d7f63540356f065aa2d6fb1be17"
+commit = "b03cb81d5bb30476adfb54c4be644ae94334dd93"
 url = "git+https://github.com/flyology-ada/tla.git"
