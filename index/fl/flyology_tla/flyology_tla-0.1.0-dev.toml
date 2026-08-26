@@ -28,5 +28,5 @@ command = ["./scripts/test.sh"]
 "*" = { Compile_Checks = "warnings" }
 
 [origin]
-commit = "e75b848347826850985610553e49015eb83de7a2"
+commit = "faf06c48246931e30b7fe9c5c786660185925666"
 url = "git+https://github.com/flyology-ada/tla.git"
