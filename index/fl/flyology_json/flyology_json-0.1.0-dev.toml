@@ -20,5 +20,5 @@ command = ["./scripts/test-all.sh"]
 "*" = { Compile_Checks = "warnings" }
 
 [origin]
-commit = "f8a4a0331a03552733e7bd8531552ba0c21f8997"
+commit = "3445b7540b89c3d1aa5c55d43b2817fab97710ae"
 url = "git+https://github.com/flyology-ada/flyology-json.git"
