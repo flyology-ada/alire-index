@@ -34,6 +34,6 @@ type = "test"
 command = ["./tests/scripts/test.sh"]
 
 [origin]
-commit = "5876862c53f4023fc08dbc1c72fb96d63ffabfdb"
+commit = "0673cdadddb7901ba5b967b83354ff3ca13c7165"
 subdir = "server"
 url = "git+https://github.com/flyology-ada/flyology-object-storage.git"
