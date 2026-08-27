@@ -15,6 +15,6 @@ project-files = ["flyology_object_storage_sqlite.gpr"]
 flyology_object_storage = "=0.1.0-dev"
 
 [origin]
-commit = "aff992c0bca4f7f8668f21e2dbcc81651e054d05"
+commit = "ace67878e942c543d7ba9f8c40936d86a3d0651e"
 subdir = "sqlite"
 url = "git+https://github.com/flyology-ada/flyology-object-storage.git"
