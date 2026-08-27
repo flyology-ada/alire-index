@@ -250,6 +250,10 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertTrue(collapsed[0]["daily"])
         self.assertEqual(collapsed[0]["first_commit"], "1" * 40)
         self.assertEqual(collapsed[0]["last_commit"], "2" * 40)
+        self.assertEqual(
+            [commit["commit"] for commit in collapsed[0]["commits"]],
+            ["1" * 40, "2" * 40],
+        )
         preview = generate_site.render_change_preview(self.catalog, history)
         changes = generate_site.render_changes_page(self.catalog, history)
         for rendered in (preview, changes):
@@ -259,8 +263,12 @@ class GenerateSiteTests(unittest.TestCase):
             self.assertIn(f'<code>{"a" * 8}</code>', rendered)
             self.assertIn(f'<code>{"c" * 8}</code>', rendered)
         self.assertIn("Daily development updates", changes)
-        self.assertIn(f'first <code>{"1" * 8}</code>', changes)
-        self.assertIn(f'last <code>{"2" * 8}</code>', changes)
+        self.assertIn(f'2 updates: <a href="{generate_site.REPOSITORY_URL}/commit/', changes)
+        self.assertIn(f'<code>{"1" * 8}</code></a>', changes)
+        self.assertIn(f'<code>{"2" * 8}</code></a>', changes)
+        self.assertIn("→ … →", changes)
+        self.assertIn("<summary>Show all 2 updates</summary>", changes)
+        self.assertNotIn("<summary>Show all 2 updates</summary>", preview)
 
     def test_stats_page_reports_composition_and_git_activity(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")

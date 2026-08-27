@@ -1326,6 +1326,14 @@ def collapse_daily_development_changes(
             "first_commit": oldest_group["commit"],
             "last_commit": latest_group["commit"],
             "commit_count": len(indices),
+            "commits": [
+                {
+                    "commit": history[index]["commit"],
+                    "timestamp": history[index]["timestamp"],
+                    "summary": history[index]["summary"],
+                }
+                for index in sorted(indices, reverse=True)
+            ],
             "entries": sorted(
                 entries,
                 key=lambda entry: (entry["name"], version_key(entry["version"])),
@@ -2971,19 +2979,30 @@ def render_changes_page(
             first_commit = group["first_commit"]
             last_commit = group["last_commit"]
             commit_count = group["commit_count"]
-            commit_label = "commit" if commit_count == 1 else "commits"
             provenance = (
-                f'<span>{commit_count} index {commit_label} condensed: '
-                f'<a href="{repository_url}/commit/{html.escape(first_commit, quote=True)}">first <code>{html.escape(first_commit[:8])}</code></a>'
-                '<span aria-hidden="true"> → </span>'
+                f'<span>{commit_count} updates: '
+                f'<a href="{repository_url}/commit/{html.escape(first_commit, quote=True)}"><code>{html.escape(first_commit[:8])}</code></a>'
+                '<span aria-hidden="true"> → … → </span>'
                 '<span class="visually-hidden"> through </span>'
-                f'<a href="{repository_url}/commit/{html.escape(last_commit, quote=True)}">last <code>{html.escape(last_commit[:8])}</code></a></span>'
+                f'<a href="{repository_url}/commit/{html.escape(last_commit, quote=True)}"><code>{html.escape(last_commit[:8])}</code></a></span>'
             )
+            commit_items = "".join(
+                f'<li><time datetime="{html.escape(commit["timestamp"], quote=True)}">{html.escape(commit["timestamp"][11:16])}</time>'
+                f'<a href="{repository_url}/commit/{html.escape(commit["commit"], quote=True)}"><code>{html.escape(commit["commit"][:8])}</code></a>'
+                f'<span>{html.escape(commit["summary"])}</span></li>'
+                for commit in group["commits"]
+            )
+            commit_disclosure = f"""
+              <details class="change-commit-disclosure">
+                <summary>Show all {commit_count} updates</summary>
+                <ol>{commit_items}</ol>
+              </details>"""
         else:
             provenance = (
                 f'<a href="{repository_url}/commit/{html.escape(group["commit"], quote=True)}">'
                 f'<code>{html.escape(group["commit"][:8])}</code> on GitHub</a>'
             )
+            commit_disclosure = ""
         groups.append(
             f"""
         <li class="change-group">
@@ -2992,6 +3011,7 @@ def render_changes_page(
             <div>
               <h2>{html.escape(group['summary'])}</h2>
               {provenance}
+              {commit_disclosure}
             </div>
           </header>
           <div class="change-group-entries">{entries}</div>
@@ -3613,6 +3633,12 @@ INDEX_CSS = r"""
 .change-group-heading { display: grid; grid-template-columns: 8rem minmax(0, 1fr); align-items: start; gap: 2rem; }
 .change-group-heading h2 { max-width: 34ch; margin: 0 0 .4rem; font-size: 1.25rem; letter-spacing: -.02em; }
 .change-group-heading a { font-size: .68rem; }
+.change-commit-disclosure { margin-top: .7rem; color: var(--ink-soft); font-size: .68rem; }
+.change-commit-disclosure > summary { width: fit-content; color: var(--violet-deep); font-weight: 620; cursor: pointer; }
+.change-commit-disclosure > ol { display: grid; margin: .8rem 0 0; padding: 0; gap: .4rem; list-style: none; }
+.change-commit-disclosure li { display: grid; grid-template-columns: 3.5rem 5rem minmax(0, 1fr); align-items: baseline; gap: .65rem; }
+.change-commit-disclosure li time { font-family: var(--font-mono); }
+.change-commit-disclosure li span { color: var(--ink); }
 .change-group-entries { margin: 1.8rem 0 0 10rem; border-top: 1px solid var(--line); }
 .change-group-entries .change-entry { padding-block: 1.4rem; border-bottom: 1px solid var(--line); }
 .change-group-entries .change-entry:last-child { border-bottom: 0; }
