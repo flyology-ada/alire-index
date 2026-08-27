@@ -192,10 +192,15 @@ class GenerateSiteTests(unittest.TestCase):
     def test_same_day_development_updates_are_collapsed_to_the_full_range(self) -> None:
         path = "index/ex/example/example-0.2.0-dev.toml"
 
-        def manifest(revision: str, constraint: str) -> dict[str, object]:
+        def manifest(
+            revision: str,
+            constraint: str,
+            name: str = "example",
+            version: str = "0.2.0-dev",
+        ) -> dict[str, object]:
             return {
-                "name": "example",
-                "version": "0.2.0-dev",
+                "name": name,
+                "version": version,
                 "depends-on": [{"base": constraint}],
                 "origin": {
                     "url": "git+https://github.com/example/example.git",
@@ -205,41 +210,60 @@ class GenerateSiteTests(unittest.TestCase):
 
         first = manifest("a", "^1")
         middle = manifest("b", "^2")
-        last = manifest("c", "^3")
+        later_middle = manifest("b", "^2", version="0.3.0-dev")
+        last = manifest("c", "^3", version="0.3.0-dev")
         first_update = generate_site.change_entry("M", path, first, middle)
-        last_update = generate_site.change_entry("M", path, middle, last)
+        last_update = generate_site.change_entry(
+            "M", "index/ex/example/example-0.3.0-dev.toml", later_middle, last
+        )
+        companion_path = "index/co/companion/companion-0.2.0-dev.toml"
+        companion_first = generate_site.change_entry(
+            "M",
+            companion_path,
+            manifest("d", "^1", "companion"),
+            manifest("e", "^2", "companion"),
+        )
+        companion_last = generate_site.change_entry(
+            "M",
+            companion_path,
+            manifest("e", "^2", "companion"),
+            manifest("f", "^3", "companion"),
+        )
         publication = generate_site.change_entry(
             "A",
             "index/ot/other/other-1.0.0.toml",
             None,
             {"name": "other", "version": "1.0.0"},
         )
-        assert first_update and last_update and publication
+        assert first_update and last_update and companion_first and companion_last
+        assert publication
         history = [
             {
                 "commit": "2" * 40,
                 "timestamp": "2026-08-27T15:00:00Z",
                 "subject": "Last update",
                 "summary": "Last update",
-                "entries": [last_update],
+                "message": "Last update\n\nLatest context.\n\nSolution: Latest solution.",
+                "entries": [last_update, companion_last],
             },
             {
                 "commit": "1" * 40,
                 "timestamp": "2026-08-27T09:00:00Z",
                 "subject": "First update",
                 "summary": "First update",
-                "entries": [first_update, publication],
+                "message": "First update\n\nFirst context.\n\nSolution: First solution.",
+                "entries": [first_update, companion_first, publication],
             },
         ]
 
         collapsed = generate_site.collapse_daily_development_changes(history)
 
-        self.assertEqual(sum(len(group["entries"]) for group in collapsed), 2)
+        self.assertEqual(sum(len(group["entries"]) for group in collapsed), 3)
         development = next(
             entry
             for group in collapsed
             for entry in group["entries"]
-            if entry["kind"] == "development"
+            if entry["kind"] == "development" and entry["name"] == "example"
         )
         self.assertEqual(development["before_revision"], "a" * 40)
         self.assertEqual(development["revision"], "c" * 40)
@@ -248,27 +272,33 @@ class GenerateSiteTests(unittest.TestCase):
             [{"kind": "changed", "name": "base", "before": "^1", "after": "^3"}],
         )
         self.assertTrue(collapsed[0]["daily"])
-        self.assertEqual(collapsed[0]["first_commit"], "1" * 40)
-        self.assertEqual(collapsed[0]["last_commit"], "2" * 40)
         self.assertEqual(
-            [commit["commit"] for commit in collapsed[0]["commits"]],
+            [update["index_commit"] for update in development["updates"]],
             ["1" * 40, "2" * 40],
         )
         preview = generate_site.render_change_preview(self.catalog, history)
         changes = generate_site.render_changes_page(self.catalog, history)
         for rendered in (preview, changes):
             self.assertEqual(
-                rendered.count('class="change-entry change-entry-development"'), 1
+                rendered.count('class="change-entry change-entry-development"'), 2
             )
             self.assertIn(f'<code>{"a" * 8}</code>', rendered)
             self.assertIn(f'<code>{"c" * 8}</code>', rendered)
-        self.assertIn("Daily development updates", changes)
-        self.assertIn(f'2 updates: <a href="{generate_site.REPOSITORY_URL}/commit/', changes)
-        self.assertIn(f'<code>{"1" * 8}</code></a>', changes)
-        self.assertIn(f'<code>{"2" * 8}</code></a>', changes)
+        self.assertIn("Development updates", changes)
+        self.assertIn(
+            '<span>2 updates:</span> <a href="https://github.com/example/example/commit/',
+            changes,
+        )
+        self.assertIn(f'index <code>{"1" * 8}</code>', changes)
+        self.assertIn(f'index <code>{"2" * 8}</code>', changes)
         self.assertIn("→ … →", changes)
-        self.assertIn("<summary>Show all 2 updates</summary>", changes)
+        self.assertEqual(changes.count("<summary>Show all 2 updates</summary>"), 2)
         self.assertNotIn("<summary>Show all 2 updates</summary>", preview)
+        self.assertEqual(changes.count('<details class="change-update-message">'), 4)
+        self.assertIn("<summary>First update</summary>", changes)
+        self.assertIn("First context.", changes)
+        self.assertNotIn("First context.", preview)
+        self.assertNotIn("<dt>Source revision</dt>", changes)
 
     def test_stats_page_reports_composition_and_git_activity(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")

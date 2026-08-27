@@ -1250,6 +1250,7 @@ def load_change_history(
                 "timestamp": timestamp,
                 "subject": subject,
                 "summary": solution_summary(message, subject),
+                "message": message,
                 "entries": sorted(entries, key=lambda entry: (entry["name"], version_key(entry["version"]))),
             }
         )
@@ -1259,7 +1260,7 @@ def load_change_history(
 def collapse_daily_development_changes(
     history: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Collapse repeated same-day updates to each development manifest.
+    """Collapse repeated same-day updates to each development crate.
 
     Git history is newest first. Repeated updates are placed in a synthetic
     daily group so their net source range is not attributed to any one commit.
@@ -1275,7 +1276,7 @@ def collapse_daily_development_changes(
             if entry["kind"] != "development":
                 collapsed[group_index]["entries"].append(entry)
                 continue
-            updates[(day, entry["path"])].append((group_index, entry))
+            updates[(day, entry["name"])].append((group_index, entry))
 
     daily_entries: dict[str, list[dict[str, Any]]] = defaultdict(list)
     daily_group_indices: dict[str, set[int]] = defaultdict(set)
@@ -1303,6 +1304,21 @@ def collapse_daily_development_changes(
             "dependency_changes": dependency_changes(before, after),
             "before_source_url": before_url,
             "before_revision": before_revision,
+            "updates": [
+                {
+                    "index_commit": history[group_index]["commit"],
+                    "timestamp": history[group_index]["timestamp"],
+                    "subject": history[group_index]["subject"],
+                    "message": history[group_index].get(
+                        "message", history[group_index]["subject"]
+                    ),
+                    "before_source_url": entry["before_source_url"],
+                    "before_revision": entry["before_revision"],
+                    "source_url": entry["source_url"],
+                    "revision": entry["revision"],
+                }
+                for group_index, entry in reversed(daily_updates)
+            ],
         }
         day = history[latest_group]["timestamp"][:10]
         daily_entries[day].append(merged)
@@ -1318,22 +1334,10 @@ def collapse_daily_development_changes(
     for day, entries in daily_entries.items():
         indices = daily_group_indices[day]
         latest_group = history[min(indices)]
-        oldest_group = history[max(indices)]
         daily_groups[min(indices)] = {
             "timestamp": latest_group["timestamp"],
-            "summary": "Daily development updates",
+            "summary": "Development updates",
             "daily": True,
-            "first_commit": oldest_group["commit"],
-            "last_commit": latest_group["commit"],
-            "commit_count": len(indices),
-            "commits": [
-                {
-                    "commit": history[index]["commit"],
-                    "timestamp": history[index]["timestamp"],
-                    "summary": history[index]["summary"],
-                }
-                for index in sorted(indices, reverse=True)
-            ],
             "entries": sorted(
                 entries,
                 key=lambda entry: (entry["name"], version_key(entry["version"])),
@@ -2454,6 +2458,57 @@ def render_dependency_changes(changes: list[dict[str, str]]) -> str:
     return f'<div class="change-dependencies"><h4>Dependency changes</h4><ul>{"".join(items)}</ul></div>'
 
 
+def render_development_updates(
+    updates: list[dict[str, Any]], repository_url: str
+) -> str:
+    if len(updates) < 2:
+        return ""
+    items = []
+    for update in updates:
+        before_revision = update["before_revision"]
+        revision = update["revision"]
+        revision_range = (
+            f'{source_link(update["before_source_url"], before_revision, before_revision[:8])}'
+            '<span aria-hidden="true"> → </span>'
+            '<span class="visually-hidden"> updated to </span>'
+            f'{source_link(update["source_url"], revision, revision[:8])}'
+            if before_revision and revision
+            else '<span class="quiet">Source revision unavailable</span>'
+        )
+        index_commit = update["index_commit"]
+        subject = str(update.get("subject") or "Update source revision")
+        message = str(update.get("message") or subject)
+        message_body = message[len(subject) :].strip() if message.startswith(subject) else message
+        paragraphs = [
+            paragraph.strip()
+            for paragraph in re.split(r"\n\s*\n", message_body)
+            if paragraph.strip()
+        ]
+        if paragraphs:
+            body = "".join(
+                f'<p>{html.escape(paragraph).replace(chr(10), "<br>")}</p>'
+                for paragraph in paragraphs
+            )
+            description = (
+                '<details class="change-update-message">'
+                f'<summary>{html.escape(subject)}</summary>'
+                f'<div>{body}</div></details>'
+            )
+        else:
+            description = f'<span class="change-update-subject">{html.escape(subject)}</span>'
+        items.append(
+            f'<li><time datetime="{html.escape(update["timestamp"], quote=True)}">{html.escape(update["timestamp"][11:16])}</time>'
+            f'<span class="change-update-revisions">{revision_range}</span>'
+            f'<a class="change-update-index" href="{repository_url}/commit/{html.escape(index_commit, quote=True)}">index <code>{html.escape(index_commit[:8])}</code></a>'
+            f'{description}</li>'
+        )
+    return f"""
+          <details class="change-update-disclosure">
+            <summary>Show all {len(updates)} updates</summary>
+            <ol>{''.join(items)}</ol>
+          </details>"""
+
+
 def render_change_entry(
     entry: dict[str, Any],
     *,
@@ -2469,7 +2524,23 @@ def render_change_entry(
     fields = ", ".join(entry["changed_fields"])
     before_revision = entry["before_revision"]
     revision = entry["revision"]
-    if entry["kind"] == "development" and before_revision and revision:
+    updates = entry.get("updates", [])
+    if (
+        entry["kind"] == "development"
+        and len(updates) > 1
+        and before_revision
+        and revision
+    ):
+        concise = (
+            f'<span>{len(updates)} updates:</span> '
+            f'{source_link(entry["before_source_url"], before_revision, before_revision[:8])}'
+            '<span aria-hidden="true"> → … → </span>'
+            '<span class="visually-hidden"> through </span>'
+            f'{source_link(entry["source_url"], revision, revision[:8])}'
+        )
+    elif entry["kind"] == "development" and len(updates) > 1:
+        concise = f"{len(updates)} updates"
+    elif entry["kind"] == "development" and before_revision and revision:
         concise = (
             f'{source_link(entry["before_source_url"], before_revision, before_revision[:8])}'
             f'<span aria-hidden="true">→</span><span class="visually-hidden"> updated to </span>'
@@ -2486,7 +2557,7 @@ def render_change_entry(
         facts = []
         if entry["kind"] in ("package", "published"):
             facts.append(f'<div><dt>Origin</dt><dd>{html.escape(origin_summary(entry["manifest"]))}</dd></div>')
-        elif before_revision or revision:
+        elif (before_revision or revision) and len(updates) < 2:
             facts.append(f'<div><dt>Source revision</dt><dd class="change-revisions">{concise}</dd></div>')
         if fields:
             facts.append(f'<div><dt>Manifest fields</dt><dd>{html.escape(fields)}</dd></div>')
@@ -2502,6 +2573,7 @@ def render_change_entry(
         details = f"""
           <p class="change-description">{html.escape(entry['description'])}</p>
           <dl class="change-facts">{"".join(facts)}</dl>
+          {render_development_updates(updates, repository_url)}
           {render_dependency_changes(entry['dependency_changes'])}
           {comparison}"""
     return f"""
@@ -2976,33 +3048,12 @@ def render_changes_page(
             for entry in group["entries"]
         )
         if group.get("daily"):
-            first_commit = group["first_commit"]
-            last_commit = group["last_commit"]
-            commit_count = group["commit_count"]
-            provenance = (
-                f'<span>{commit_count} updates: '
-                f'<a href="{repository_url}/commit/{html.escape(first_commit, quote=True)}"><code>{html.escape(first_commit[:8])}</code></a>'
-                '<span aria-hidden="true"> → … → </span>'
-                '<span class="visually-hidden"> through </span>'
-                f'<a href="{repository_url}/commit/{html.escape(last_commit, quote=True)}"><code>{html.escape(last_commit[:8])}</code></a></span>'
-            )
-            commit_items = "".join(
-                f'<li><time datetime="{html.escape(commit["timestamp"], quote=True)}">{html.escape(commit["timestamp"][11:16])}</time>'
-                f'<a href="{repository_url}/commit/{html.escape(commit["commit"], quote=True)}"><code>{html.escape(commit["commit"][:8])}</code></a>'
-                f'<span>{html.escape(commit["summary"])}</span></li>'
-                for commit in group["commits"]
-            )
-            commit_disclosure = f"""
-              <details class="change-commit-disclosure">
-                <summary>Show all {commit_count} updates</summary>
-                <ol>{commit_items}</ol>
-              </details>"""
+            provenance = ""
         else:
             provenance = (
                 f'<a href="{repository_url}/commit/{html.escape(group["commit"], quote=True)}">'
                 f'<code>{html.escape(group["commit"][:8])}</code> on GitHub</a>'
             )
-            commit_disclosure = ""
         groups.append(
             f"""
         <li class="change-group">
@@ -3011,7 +3062,6 @@ def render_changes_page(
             <div>
               <h2>{html.escape(group['summary'])}</h2>
               {provenance}
-              {commit_disclosure}
             </div>
           </header>
           <div class="change-group-entries">{entries}</div>
@@ -3633,12 +3683,6 @@ INDEX_CSS = r"""
 .change-group-heading { display: grid; grid-template-columns: 8rem minmax(0, 1fr); align-items: start; gap: 2rem; }
 .change-group-heading h2 { max-width: 34ch; margin: 0 0 .4rem; font-size: 1.25rem; letter-spacing: -.02em; }
 .change-group-heading a { font-size: .68rem; }
-.change-commit-disclosure { margin-top: .7rem; color: var(--ink-soft); font-size: .68rem; }
-.change-commit-disclosure > summary { width: fit-content; color: var(--violet-deep); font-weight: 620; cursor: pointer; }
-.change-commit-disclosure > ol { display: grid; margin: .8rem 0 0; padding: 0; gap: .4rem; list-style: none; }
-.change-commit-disclosure li { display: grid; grid-template-columns: 3.5rem 5rem minmax(0, 1fr); align-items: baseline; gap: .65rem; }
-.change-commit-disclosure li time { font-family: var(--font-mono); }
-.change-commit-disclosure li span { color: var(--ink); }
 .change-group-entries { margin: 1.8rem 0 0 10rem; border-top: 1px solid var(--line); }
 .change-group-entries .change-entry { padding-block: 1.4rem; border-bottom: 1px solid var(--line); }
 .change-group-entries .change-entry:last-child { border-bottom: 0; }
@@ -3655,6 +3699,23 @@ INDEX_CSS = r"""
 .change-dependencies li { display: flex; flex-wrap: wrap; align-items: center; padding: .45rem .65rem; gap: .35rem; background: var(--surface); color: var(--ink-soft); font-size: .72rem; }
 .change-dependencies li code:first-child { color: var(--ink); }
 .change-compare { display: inline-flex; margin-top: 1rem; font-size: .75rem; font-weight: 620; }
+.change-update-disclosure { margin-top: 1rem; color: var(--ink-soft); font-size: .72rem; }
+.change-update-disclosure > summary { width: fit-content; color: var(--violet-deep); font-weight: 620; cursor: pointer; }
+.change-update-disclosure > summary:hover { color: var(--violet); }
+.change-update-disclosure > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .3rem; }
+.change-update-disclosure > ol { display: grid; margin: .8rem 0 0; padding: .8rem 0 0; gap: .55rem; border-top: 1px solid var(--line); list-style: none; }
+.change-update-disclosure li { display: grid; grid-template-columns: 3.5rem minmax(12rem, 1fr) 7rem; align-items: baseline; gap: .75rem; }
+.change-update-disclosure li time { font-family: var(--font-mono); }
+.change-update-revisions { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.change-update-index { justify-self: end; white-space: nowrap; }
+.change-update-message, .change-update-subject { grid-column: 2 / -1; }
+.change-update-message > summary { width: fit-content; color: var(--ink); cursor: pointer; }
+.change-update-message > summary:hover { color: var(--violet-deep); }
+.change-update-message > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .25rem; }
+.change-update-message > div { max-width: 70ch; margin-top: .55rem; padding: .65rem .75rem; background: var(--surface); color: var(--ink-soft); line-height: 1.55; }
+.change-update-message p { margin: 0; }
+.change-update-message p + p { margin-top: .6rem; }
+.change-update-subject { color: var(--ink); }
 .empty-state { padding: 4rem 1rem; border-bottom: 1px solid var(--line); text-align: center; }
 .empty-state h3 { margin-bottom: .5rem; }
 .empty-state p { color: var(--ink-soft); }
@@ -3704,6 +3765,8 @@ INDEX_CSS = r"""
   .change-stats p, .change-stats p:first-child { padding-inline: 0; border-right: 0; border-bottom: 1px solid var(--line); }
   .change-stats p:last-child { border-bottom: 0; }
   .change-facts > div { grid-template-columns: 1fr; gap: .3rem; }
+  .change-update-disclosure li { grid-template-columns: 3.5rem minmax(0, 1fr); }
+  .change-update-index { grid-column: 2; justify-self: start; }
   .expand-button { grid-column: auto; }
   .package-summary { min-height: 0; padding-block: 1.4rem; }
   .package-body { padding-inline: .35rem; }

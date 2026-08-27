@@ -82,7 +82,7 @@ Relative documentation links and images remain pinned to the source commit used.
 The homepage includes a bounded digest of recent index activity. The changes
 page derives its detailed publication and development-update history from Git,
 including source revision and dependency changes. Repeated updates to the same
-development manifest are condensed per calendar day from the first previous
+development crate are condensed per calendar day from the first previous
 revision to the final new revision, while the Pages checkout retains full
 repository history.
 The community landing page has the same bounded recent-changes digest for
