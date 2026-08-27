@@ -28,5 +28,5 @@ command = ["./tests/scripts/test.sh"]
 xmlada = "^26.0.0"
 
 [origin]
-commit = "2c7efdda1cd44a74bd9a6489b08772908cfc9ea9"
+commit = "77811f75230d7106915f881d95c705fa82b07ea4"
 url = "git+https://github.com/flyology-ada/flyology-object-storage.git"
