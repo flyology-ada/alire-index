@@ -1155,6 +1155,7 @@ def change_entry(
         "development": development,
         "description": after.get("description", "No description provided."),
         "path": path,
+        "before_manifest": before,
         "manifest": after,
         "changed_fields": changed_fields,
         "dependency_changes": dependency_changes(before, after),
@@ -1253,6 +1254,91 @@ def load_change_history(
             }
         )
     return history
+
+
+def collapse_daily_development_changes(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse repeated same-day updates to each development manifest.
+
+    Git history is newest first. Repeated updates are placed in a synthetic
+    daily group so their net source range is not attributed to any one commit.
+    """
+    collapsed = [{**group, "entries": []} for group in history]
+    updates: dict[
+        tuple[str, str], list[tuple[int, dict[str, Any]]]
+    ] = defaultdict(list)
+
+    for group_index, group in enumerate(history):
+        day = group["timestamp"][:10]
+        for entry in group["entries"]:
+            if entry["kind"] != "development":
+                collapsed[group_index]["entries"].append(entry)
+                continue
+            updates[(day, entry["path"])].append((group_index, entry))
+
+    daily_entries: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    daily_group_indices: dict[str, set[int]] = defaultdict(set)
+    for daily_updates in updates.values():
+        if len(daily_updates) == 1:
+            group_index, entry = daily_updates[0]
+            collapsed[group_index]["entries"].append(entry)
+            continue
+        latest_group, latest = daily_updates[0]
+        _oldest_group, oldest = daily_updates[-1]
+        before = oldest.get("before_manifest")
+        after = latest["manifest"]
+        before_url, before_revision = source_revision(before)
+        if before is None:
+            before_url = oldest["before_source_url"]
+            before_revision = oldest["before_revision"]
+        merged = {
+            **latest,
+            "before_manifest": before,
+            "changed_fields": sorted(
+                key
+                for key in (before or {}).keys() | after.keys()
+                if (before or {}).get(key) != after.get(key)
+            ),
+            "dependency_changes": dependency_changes(before, after),
+            "before_source_url": before_url,
+            "before_revision": before_revision,
+        }
+        day = history[latest_group]["timestamp"][:10]
+        daily_entries[day].append(merged)
+        daily_group_indices[day].update(
+            group_index for group_index, _entry in daily_updates
+        )
+
+    for group in collapsed:
+        group["entries"].sort(
+            key=lambda entry: (entry["name"], version_key(entry["version"]))
+        )
+    daily_groups: dict[int, dict[str, Any]] = {}
+    for day, entries in daily_entries.items():
+        indices = daily_group_indices[day]
+        latest_group = history[min(indices)]
+        oldest_group = history[max(indices)]
+        daily_groups[min(indices)] = {
+            "timestamp": latest_group["timestamp"],
+            "summary": "Daily development updates",
+            "daily": True,
+            "first_commit": oldest_group["commit"],
+            "last_commit": latest_group["commit"],
+            "commit_count": len(indices),
+            "entries": sorted(
+                entries,
+                key=lambda entry: (entry["name"], version_key(entry["version"])),
+            ),
+        }
+
+    result = []
+    for group_index, group in enumerate(collapsed):
+        if group_index in daily_groups:
+            result.append(daily_groups[group_index])
+        if group["entries"]:
+            result.append(group)
+    return result
 
 
 def parse_instant(value: str) -> datetime:
@@ -2424,6 +2510,7 @@ def render_change_entry(
 def render_change_preview(
     catalog: dict[str, Any], history: list[dict[str, Any]]
 ) -> str:
+    history = collapse_daily_development_changes(history)
     all_entries = []
     for group in history:
         for entry in group["entries"]:
@@ -2852,6 +2939,7 @@ def render_detail_header(root_prefix: str, catalog: dict[str, Any]) -> str:
 def render_changes_page(
     catalog: dict[str, Any], history: list[dict[str, Any]]
 ) -> str:
+    history = collapse_daily_development_changes(history)
     catalog_name = catalog["catalog"]["name"]
     repository_url = catalog["catalog"]["repository_url"]
     repository_revision = catalog["catalog"].get("revision") or "main"
@@ -2879,6 +2967,23 @@ def render_changes_page(
             )
             for entry in group["entries"]
         )
+        if group.get("daily"):
+            first_commit = group["first_commit"]
+            last_commit = group["last_commit"]
+            commit_count = group["commit_count"]
+            commit_label = "commit" if commit_count == 1 else "commits"
+            provenance = (
+                f'<span>{commit_count} index {commit_label} condensed: '
+                f'<a href="{repository_url}/commit/{html.escape(first_commit, quote=True)}">first <code>{html.escape(first_commit[:8])}</code></a>'
+                '<span aria-hidden="true"> → </span>'
+                '<span class="visually-hidden"> through </span>'
+                f'<a href="{repository_url}/commit/{html.escape(last_commit, quote=True)}">last <code>{html.escape(last_commit[:8])}</code></a></span>'
+            )
+        else:
+            provenance = (
+                f'<a href="{repository_url}/commit/{html.escape(group["commit"], quote=True)}">'
+                f'<code>{html.escape(group["commit"][:8])}</code> on GitHub</a>'
+            )
         groups.append(
             f"""
         <li class="change-group">
@@ -2886,7 +2991,7 @@ def render_changes_page(
             <time datetime="{html.escape(group['timestamp'], quote=True)}">{html.escape(change_date_label(group['timestamp']))}</time>
             <div>
               <h2>{html.escape(group['summary'])}</h2>
-              <a href="{repository_url}/commit/{html.escape(group['commit'], quote=True)}"><code>{html.escape(group['commit'][:8])}</code> on GitHub</a>
+              {provenance}
             </div>
           </header>
           <div class="change-group-entries">{entries}</div>

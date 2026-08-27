@@ -169,7 +169,9 @@ class GenerateSiteTests(unittest.TestCase):
 
     def test_home_page_has_a_bounded_change_preview(self) -> None:
         page = (self.output / "index.html").read_text(encoding="utf-8")
-        history = generate_site.load_change_history(self.catalog)
+        history = generate_site.collapse_daily_development_changes(
+            generate_site.load_change_history(self.catalog)
+        )
         entry_count = sum(len(group["entries"]) for group in history)
         self.assertIn('href="changes/"', page)
         self.assertIn('id="changes-preview-title"', page)
@@ -186,6 +188,79 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertIn("Index changes.", page)
         self.assertIn(f"{generate_site.REPOSITORY_URL}/commit/", page)
         self.assertIn(history[0]["commit"][:8], page)
+
+    def test_same_day_development_updates_are_collapsed_to_the_full_range(self) -> None:
+        path = "index/ex/example/example-0.2.0-dev.toml"
+
+        def manifest(revision: str, constraint: str) -> dict[str, object]:
+            return {
+                "name": "example",
+                "version": "0.2.0-dev",
+                "depends-on": [{"base": constraint}],
+                "origin": {
+                    "url": "git+https://github.com/example/example.git",
+                    "commit": revision * 40,
+                },
+            }
+
+        first = manifest("a", "^1")
+        middle = manifest("b", "^2")
+        last = manifest("c", "^3")
+        first_update = generate_site.change_entry("M", path, first, middle)
+        last_update = generate_site.change_entry("M", path, middle, last)
+        publication = generate_site.change_entry(
+            "A",
+            "index/ot/other/other-1.0.0.toml",
+            None,
+            {"name": "other", "version": "1.0.0"},
+        )
+        assert first_update and last_update and publication
+        history = [
+            {
+                "commit": "2" * 40,
+                "timestamp": "2026-08-27T15:00:00Z",
+                "subject": "Last update",
+                "summary": "Last update",
+                "entries": [last_update],
+            },
+            {
+                "commit": "1" * 40,
+                "timestamp": "2026-08-27T09:00:00Z",
+                "subject": "First update",
+                "summary": "First update",
+                "entries": [first_update, publication],
+            },
+        ]
+
+        collapsed = generate_site.collapse_daily_development_changes(history)
+
+        self.assertEqual(sum(len(group["entries"]) for group in collapsed), 2)
+        development = next(
+            entry
+            for group in collapsed
+            for entry in group["entries"]
+            if entry["kind"] == "development"
+        )
+        self.assertEqual(development["before_revision"], "a" * 40)
+        self.assertEqual(development["revision"], "c" * 40)
+        self.assertEqual(
+            development["dependency_changes"],
+            [{"kind": "changed", "name": "base", "before": "^1", "after": "^3"}],
+        )
+        self.assertTrue(collapsed[0]["daily"])
+        self.assertEqual(collapsed[0]["first_commit"], "1" * 40)
+        self.assertEqual(collapsed[0]["last_commit"], "2" * 40)
+        preview = generate_site.render_change_preview(self.catalog, history)
+        changes = generate_site.render_changes_page(self.catalog, history)
+        for rendered in (preview, changes):
+            self.assertEqual(
+                rendered.count('class="change-entry change-entry-development"'), 1
+            )
+            self.assertIn(f'<code>{"a" * 8}</code>', rendered)
+            self.assertIn(f'<code>{"c" * 8}</code>', rendered)
+        self.assertIn("Daily development updates", changes)
+        self.assertIn(f'first <code>{"1" * 8}</code>', changes)
+        self.assertIn(f'last <code>{"2" * 8}</code>', changes)
 
     def test_stats_page_reports_composition_and_git_activity(self) -> None:
         home = (self.output / "index.html").read_text(encoding="utf-8")
