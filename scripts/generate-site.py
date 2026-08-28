@@ -635,6 +635,9 @@ class SourceDocumentLoader:
         self.repositories: dict[str, Path] = {}
         self.documents: dict[tuple[str, str, str, str], ReleaseDocuments] = {}
         self.commits: dict[str, list[str]] = defaultdict(list)
+        self.commit_ranges: dict[
+            tuple[str, str, str], list[dict[str, str]]
+        ] = {}
 
     def git(self, repository: Path | None, *args: str) -> str:
         command = ["git"]
@@ -683,6 +686,54 @@ class SourceDocumentLoader:
     def tree_entries(self, repository: Path, commit: str, directory: str) -> list[str]:
         tree = f"{commit}:{directory}" if directory else commit
         return self.git(repository, "ls-tree", "--name-only", tree).splitlines()
+
+    def commit_history(
+        self, url: str, before: str, after: str
+    ) -> list[dict[str, str]]:
+        """Return upstream commits introduced between two indexed revisions."""
+        key = source_repository_url(url), before, after
+        if key in self.commit_ranges:
+            return self.commit_ranges[key]
+        if before == after:
+            self.commit_ranges[key] = []
+            return []
+        repository = self.repository(url, after)
+        self.repository(url, before)
+        ancestor = subprocess.run(
+            ["git", "-C", str(repository), "merge-base", "--is-ancestor", before, after],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if ancestor.returncode:
+            self.commit_ranges[key] = []
+            return []
+        raw = self.git(
+            repository,
+            "log",
+            "--reverse",
+            "--format=%H%x00%cI%x00%s%x00%B%x1e",
+            f"{before}..{after}",
+        )
+        commits = []
+        for record in raw.split("\x1e"):
+            record = record.strip()
+            if not record:
+                continue
+            try:
+                commit, timestamp, subject, message = record.split("\x00", 3)
+            except ValueError:
+                continue
+            commits.append(
+                {
+                    "commit": commit,
+                    "timestamp": timestamp,
+                    "subject": subject,
+                    "message": message.strip(),
+                }
+            )
+        self.commit_ranges[key] = commits
+        return commits
 
     def find_document(
         self,
@@ -1250,11 +1301,36 @@ def load_change_history(
                 "timestamp": timestamp,
                 "subject": subject,
                 "summary": solution_summary(message, subject),
-                "message": message,
                 "entries": sorted(entries, key=lambda entry: (entry["name"], version_key(entry["version"]))),
             }
         )
     return history
+
+
+def attach_source_commit_history(
+    history: list[dict[str, Any]], loader: SourceDocumentLoader
+) -> None:
+    """Attach upstream commit messages to development revision advances."""
+    for group in history:
+        for entry in group["entries"]:
+            if entry["kind"] != "development":
+                continue
+            before_url = entry["before_source_url"]
+            source_url = entry["source_url"]
+            before_revision = entry["before_revision"]
+            revision = entry["revision"]
+            if not (
+                before_url
+                and source_url
+                and source_repository_url(before_url)
+                == source_repository_url(source_url)
+                and before_revision
+                and revision
+            ):
+                continue
+            entry["source_commits"] = loader.commit_history(
+                source_url, before_revision, revision
+            )
 
 
 def collapse_daily_development_changes(
@@ -1308,14 +1384,11 @@ def collapse_daily_development_changes(
                 {
                     "index_commit": history[group_index]["commit"],
                     "timestamp": history[group_index]["timestamp"],
-                    "subject": history[group_index]["subject"],
-                    "message": history[group_index].get(
-                        "message", history[group_index]["subject"]
-                    ),
                     "before_source_url": entry["before_source_url"],
                     "before_revision": entry["before_revision"],
                     "source_url": entry["source_url"],
                     "revision": entry["revision"],
+                    "source_commits": entry.get("source_commits", []),
                 }
                 for group_index, entry in reversed(daily_updates)
             ],
@@ -2476,31 +2549,53 @@ def render_development_updates(
             else '<span class="quiet">Source revision unavailable</span>'
         )
         index_commit = update["index_commit"]
-        subject = str(update.get("subject") or "Update source revision")
-        message = str(update.get("message") or subject)
-        message_body = message[len(subject) :].strip() if message.startswith(subject) else message
-        paragraphs = [
-            paragraph.strip()
-            for paragraph in re.split(r"\n\s*\n", message_body)
-            if paragraph.strip()
-        ]
-        if paragraphs:
-            body = "".join(
-                f'<p>{html.escape(paragraph).replace(chr(10), "<br>")}</p>'
-                for paragraph in paragraphs
+        source_commits = update.get("source_commits", [])
+        source_items = []
+        for commit in source_commits:
+            subject = commit["subject"]
+            message = commit["message"]
+            message_body = (
+                message[len(subject) :].strip()
+                if message.startswith(subject)
+                else message
             )
-            description = (
-                '<details class="change-update-message">'
-                f'<summary>{html.escape(subject)}</summary>'
-                f'<div>{body}</div></details>'
+            paragraphs = [
+                paragraph.strip()
+                for paragraph in re.split(r"\n\s*\n", message_body)
+                if paragraph.strip()
+            ]
+            if paragraphs:
+                body = "".join(
+                    f'<p>{html.escape(paragraph).replace(chr(10), "<br>")}</p>'
+                    for paragraph in paragraphs
+                )
+                description = (
+                    '<details class="change-update-message">'
+                    f'<summary>{html.escape(subject)}</summary>'
+                    f'<div>{body}</div></details>'
+                )
+            else:
+                description = (
+                    f'<span class="change-update-subject">{html.escape(subject)}</span>'
+                )
+            source_items.append(
+                f'<li>{source_link(update["source_url"], commit["commit"], commit["commit"][:8])}'
+                f'{description}</li>'
             )
-        else:
-            description = f'<span class="change-update-subject">{html.escape(subject)}</span>'
+        source_count = len(source_commits)
+        source_label = "commit" if source_count == 1 else "commits"
+        source_history = (
+            '<div class="change-source-history">'
+            f'<p>{source_count} source {source_label}</p>'
+            f'<ol>{"".join(source_items)}</ol></div>'
+            if source_items
+            else ""
+        )
         items.append(
             f'<li><time datetime="{html.escape(update["timestamp"], quote=True)}">{html.escape(update["timestamp"][11:16])}</time>'
             f'<span class="change-update-revisions">{revision_range}</span>'
             f'<a class="change-update-index" href="{repository_url}/commit/{html.escape(index_commit, quote=True)}">index <code>{html.escape(index_commit[:8])}</code></a>'
-            f'{description}</li>'
+            f'{source_history}</li>'
         )
     return f"""
           <details class="change-update-disclosure">
@@ -3704,11 +3799,15 @@ INDEX_CSS = r"""
 .change-update-disclosure > summary:hover { color: var(--violet); }
 .change-update-disclosure > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .3rem; }
 .change-update-disclosure > ol { display: grid; margin: .8rem 0 0; padding: .8rem 0 0; gap: .55rem; border-top: 1px solid var(--line); list-style: none; }
-.change-update-disclosure li { display: grid; grid-template-columns: 3.5rem minmax(12rem, 1fr) 7rem; align-items: baseline; gap: .75rem; }
-.change-update-disclosure li time { font-family: var(--font-mono); }
+.change-update-disclosure > ol > li { display: grid; grid-template-columns: 3.5rem minmax(12rem, 1fr) 7rem; align-items: baseline; gap: .75rem; }
+.change-update-disclosure > ol > li > time { font-family: var(--font-mono); }
 .change-update-revisions { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
 .change-update-index { justify-self: end; white-space: nowrap; }
-.change-update-message, .change-update-subject { grid-column: 2 / -1; }
+.change-source-history { grid-column: 2 / -1; }
+.change-source-history > p { margin: .15rem 0 .45rem; color: var(--ink-soft); font-size: .65rem; font-weight: 620; text-transform: uppercase; }
+.change-source-history > ol { display: grid; margin: 0; padding: 0; gap: .35rem; list-style: none; }
+.change-source-history > ol > li { display: grid; grid-template-columns: 5rem minmax(0, 1fr); align-items: baseline; gap: .65rem; }
+.change-update-message, .change-update-subject { min-width: 0; }
 .change-update-message > summary { width: fit-content; color: var(--ink); cursor: pointer; }
 .change-update-message > summary:hover { color: var(--violet-deep); }
 .change-update-message > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .25rem; }
@@ -3765,7 +3864,7 @@ INDEX_CSS = r"""
   .change-stats p, .change-stats p:first-child { padding-inline: 0; border-right: 0; border-bottom: 1px solid var(--line); }
   .change-stats p:last-child { border-bottom: 0; }
   .change-facts > div { grid-template-columns: 1fr; gap: .3rem; }
-  .change-update-disclosure li { grid-template-columns: 3.5rem minmax(0, 1fr); }
+  .change-update-disclosure > ol > li { grid-template-columns: 3.5rem minmax(0, 1fr); }
   .change-update-index { grid-column: 2; justify-self: start; }
   .expand-button { grid-column: auto; }
   .package-summary { min-height: 0; padding-block: 1.4rem; }
@@ -4144,9 +4243,12 @@ def generate(
     output: Path,
     *,
     include_source_documents: bool = False,
+    include_source_history: bool | None = None,
     source_cache: Path | None = None,
     community_source: Path | None = None,
 ) -> dict[str, Any]:
+    if include_source_history is None:
+        include_source_history = include_source_documents
     catalog = load_catalog(source, attach_relationships=False)
     community_catalog = (
         load_catalog(
@@ -4180,7 +4282,7 @@ def generate(
         else None
     )
     release_documents: dict[str, ReleaseDocuments] = {}
-    if include_source_documents:
+    if include_source_documents or include_source_history:
         temporary_cache = (
             tempfile.TemporaryDirectory(prefix="alire-index-sources-")
             if source_cache is None
@@ -4189,23 +4291,26 @@ def generate(
         cache = source_cache or Path(temporary_cache.name)  # type: ignore[union-attr]
         try:
             loader = SourceDocumentLoader(cache)
-            for package in catalog["packages"]:
-                for release in package["versions"]:
-                    release_documents[release["path"]] = loader.load(
-                        release["manifest"]
-                    )
-            for package in catalog["packages"]:
-                for release in package["versions"]:
-                    documents = release_documents[release["path"]]
-                    if documents.changelog is not None:
-                        continue
-                    fallback = loader.fallback_changelog(release["manifest"])
-                    if fallback is not None:
-                        changelog, remainder = fallback
-                        release_documents[release["path"]] = documents._replace(
-                            changelog=changelog,
-                            changelog_remainder=remainder,
+            if include_source_history:
+                attach_source_commit_history(history, loader)
+            if include_source_documents:
+                for package in catalog["packages"]:
+                    for release in package["versions"]:
+                        release_documents[release["path"]] = loader.load(
+                            release["manifest"]
                         )
+                for package in catalog["packages"]:
+                    for release in package["versions"]:
+                        documents = release_documents[release["path"]]
+                        if documents.changelog is not None:
+                            continue
+                        fallback = loader.fallback_changelog(release["manifest"])
+                        if fallback is not None:
+                            changelog, remainder = fallback
+                            release_documents[release["path"]] = documents._replace(
+                                changelog=changelog,
+                                changelog_remainder=remainder,
+                            )
         finally:
             if temporary_cache is not None:
                 temporary_cache.cleanup()
@@ -4239,6 +4344,11 @@ def main() -> int:
         help="do not fetch and render pinned README and CHANGELOG files",
     )
     parser.add_argument(
+        "--source-history",
+        action="store_true",
+        help="resolve upstream commit messages even when source documents are skipped",
+    )
+    parser.add_argument(
         "--source-cache",
         type=Path,
         help="reuse bare source-repository clones from this directory",
@@ -4249,6 +4359,9 @@ def main() -> int:
             args.source.resolve(),
             args.output.resolve(),
             include_source_documents=not args.skip_source_documents,
+            include_source_history=(
+                args.source_history or not args.skip_source_documents
+            ),
             source_cache=args.source_cache.resolve() if args.source_cache else None,
             community_source=(
                 args.community_source.resolve() if args.community_source else None

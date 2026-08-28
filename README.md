@@ -84,7 +84,9 @@ page derives its detailed publication and development-update history from Git,
 including source revision and dependency changes. Repeated updates to the same
 development crate are condensed per calendar day from the first previous
 revision to the final new revision, while the Pages checkout retains full
-repository history.
+repository history. Each individual Flyology development advance also lists
+the upstream commits introduced between its two pinned source revisions,
+including expandable commit messages resolved from the source clone cache.
 The community landing page has the same bounded recent-changes digest for
 crates and versions added or updated in that index, with the complete derived
 history at `/community/changes/`. Community pages intentionally omit README

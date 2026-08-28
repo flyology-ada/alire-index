@@ -229,6 +229,22 @@ class GenerateSiteTests(unittest.TestCase):
             manifest("e", "^2", "companion"),
             manifest("f", "^3", "companion"),
         )
+        source_histories = (
+            (first_update, "b", "Add first source feature", "Source context one."),
+            (last_update, "c", "Refine source feature", "Source context two."),
+            (companion_first, "e", "Update companion", "Companion context one."),
+            (companion_last, "f", "Finish companion", "Companion context two."),
+        )
+        for entry, revision, subject, context in source_histories:
+            assert entry
+            entry["source_commits"] = [
+                {
+                    "commit": revision * 40,
+                    "timestamp": "2026-08-27T08:00:00Z",
+                    "subject": subject,
+                    "message": f"{subject}\n\n{context}",
+                }
+            ]
         publication = generate_site.change_entry(
             "A",
             "index/ot/other/other-1.0.0.toml",
@@ -295,9 +311,10 @@ class GenerateSiteTests(unittest.TestCase):
         self.assertEqual(changes.count("<summary>Show all 2 updates</summary>"), 2)
         self.assertNotIn("<summary>Show all 2 updates</summary>", preview)
         self.assertEqual(changes.count('<details class="change-update-message">'), 4)
-        self.assertIn("<summary>First update</summary>", changes)
-        self.assertIn("First context.", changes)
-        self.assertNotIn("First context.", preview)
+        self.assertIn("<summary>Add first source feature</summary>", changes)
+        self.assertIn("Source context one.", changes)
+        self.assertNotIn("Development index trails remote sources", changes)
+        self.assertNotIn("Source context one.", preview)
         self.assertNotIn("<dt>Source revision</dt>", changes)
 
     def test_stats_page_reports_composition_and_git_activity(self) -> None:
@@ -744,6 +761,62 @@ Community **testing details**.
             self.assertTrue((output / "community" / "crates.json").is_file())
             self.assertTrue(
                 (output / "community" / "crates" / "aunit.json").is_file()
+            )
+
+    def test_source_commit_history_reads_and_caches_upstream_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "source"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"],
+                check=True,
+            )
+
+            commits = []
+            for number, subject in enumerate(("Initial source", "Add transport", "Fix retry")):
+                (repository / "source.txt").write_text(str(number), encoding="utf-8")
+                subprocess.run(["git", "-C", str(repository), "add", "source.txt"], check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "commit",
+                        "-qm",
+                        subject,
+                        "-m",
+                        f"Details for {subject.lower()}.",
+                    ],
+                    check=True,
+                )
+                commits.append(
+                    subprocess.run(
+                        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                )
+
+            loader = generate_site.SourceDocumentLoader(root / "cache")
+            history = loader.commit_history(
+                repository.as_uri(), commits[0], commits[2]
+            )
+
+            self.assertEqual(
+                [commit["subject"] for commit in history],
+                ["Add transport", "Fix retry"],
+            )
+            self.assertIn("Details for add transport.", history[0]["message"])
+            self.assertIs(
+                loader.commit_history(repository.as_uri(), commits[0], commits[2]),
+                history,
             )
 
     def test_source_documents_follow_subdir_parents_and_pin_the_commit(self) -> None:
