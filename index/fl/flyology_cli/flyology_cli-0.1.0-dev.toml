@@ -1,0 +1,24 @@
+name = "flyology_cli"
+description = "Aggregate command-line tooling for Flyology projects"
+version = "0.1.0-dev"
+
+authors = ["Yurii Rashkovskii"]
+maintainers = ["Yurii Rashkovskii <yrashk@gmail.com>"]
+maintainers-logins = ["yrashk"]
+licenses = "MIT OR Apache-2.0"
+website = "https://flyology.org/"
+tags = ["ada", "cli", "scaffolding", "flyology"]
+project-files = ["flyology_cli.gpr"]
+executables = ["flyology"]
+
+[[depends-on]]
+gnat = ">=13 & <17"
+
+[[actions]]
+type = "test"
+command = ["./scripts/test.sh"]
+
+[origin]
+commit = "d29f51e4e250042af8a49950807e614716b4c611"
+subdir = "flyology_cli"
+url = "git+https://github.com/flyology-ada/flyology.git"
