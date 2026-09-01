@@ -518,9 +518,22 @@ class GenerateSiteTests(unittest.TestCase):
             self.output / "crates" / "flyology" / "0.1.0" / "index.html"
         ).read_text(encoding="utf-8")
         repository = "https://github.com/flyology-ada/flyology"
-        revision = "8e0461080e0f110b3bf70dbff283af9ca5e53a2c"
+        flyology = next(
+            package
+            for package in self.catalog["packages"]
+            if package["name"] == "flyology"
+        )
+        selected = generate_site.release_for(
+            flyology, flyology["selected_version"]
+        )
+        published = generate_site.release_for(flyology, "0.1.0")
 
-        for page in (home, crate, version):
+        for page, release in (
+            (home, selected),
+            (crate, selected),
+            (version, published),
+        ):
+            revision = release["manifest"]["origin"]["commit"]
             self.assertIn(f'href="{repository}"', page)
             self.assertIn('href="https://github.com/yrashk">@yrashk</a>', page)
             self.assertIn(">Source revision</dt>", page)
@@ -566,19 +579,17 @@ class GenerateSiteTests(unittest.TestCase):
             for package in self.catalog["packages"]
             if package["name"] == "flyology"
         )
-        selected = generate_site.release_for(
-            flyology, flyology["selected_version"]
-        )
+        published = generate_site.release_for(flyology, "0.1.0")
         top_http = next(
             record
-            for record in selected["dependants"]
+            for record in published["dependants"]
             if record["name"] == "flyology_http" and record["qualifies"]
         )
         dependants_page = (
             self.output
             / "crates"
             / "flyology"
-            / selected["version"]
+            / published["version"]
             / "dependants"
             / "index.html"
         ).read_text(encoding="utf-8")
@@ -1380,21 +1391,24 @@ Not release notes.
             for package in self.catalog["packages"]
             if package["name"] == "flyology"
         )
-        selected = generate_site.release_for(flyology, flyology["selected_version"])
-        qualifying = sum(record["qualifies"] for record in selected["dependants"])
+        published = generate_site.release_for(flyology, "0.1.0")
+        qualifying = sum(record["qualifies"] for record in published["dependants"])
         selected_http = next(
             record
-            for record in selected["dependants"]
+            for record in published["dependants"]
             if record["name"] == "flyology_http" and record["selected"]
         )
 
         self.assertEqual(home.count(">Dependants</h3>"), len(self.catalog["packages"]))
         self.assertNotIn('class="dependant-release ', home)
         self.assertNotIn('class="dependant-release ', crate)
-        self.assertIn('href="0.1.0/dependants/">View dependants</a>', crate)
+        self.assertIn(
+            f'href="{flyology["selected_version"]}/dependants/">View dependants</a>',
+            crate,
+        )
         self.assertIn(
             f'Resolved against <code>flyology 0.1.0</code> — {qualifying} of '
-            f'{len(selected["dependants"])} dependant releases qualify.',
+            f'{len(published["dependants"])} dependant releases qualify.',
             dependants,
         )
         self.assertIn(
