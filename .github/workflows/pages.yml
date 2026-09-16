@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   pages: write
   id-token: write
 
@@ -44,7 +45,15 @@ jobs:
         run: python3 -m pip install --requirement requirements-site.txt
       - name: Test generator
         run: python3 -m unittest discover -s tests -v
+      - name: Snapshot pending community PRs
+        id: community_prs
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/fetch-community-prs.py build/community-prs.json
       - name: Build site
+        env:
+          COMMUNITY_PRS_FILE: ${{ steps.community_prs.outcome == 'success' && 'build/community-prs.json' || '' }}
         run: ./scripts/build-site.sh
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4

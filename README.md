@@ -93,6 +93,13 @@ history at `/community/changes/`. Community pages intentionally omit README
 and changelog source cloning: mirroring hundreds of upstream source
 repositories during every site build would make the shadow unreliable, while
 the structured manifests, relationships, provenance, and JSON remain complete.
+The changes page also has a closed-by-default list of open community-index
+pull requests that change crate manifests. It identifies proposed new crates,
+versions, and manifest updates, with PR age and recent activity. These proposals
+are separate from the published Git history. The Pages workflow snapshots them
+from GitHub's API during each build; local builds can supply that snapshot with
+`COMMUNITY_PRS_FILE` when running `scripts/build-site.sh`. If the API snapshot
+fails, the Pages build still publishes the catalog without the pending section.
 Community crate detail pages also link to the corresponding
 [Alire Crates CI](https://alire-crate-ci.ada.dev/) report and load its small
 per-crate badge summary in the browser. The external report link remains the

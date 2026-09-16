@@ -689,11 +689,39 @@ Community **testing details**.
                 check=True,
             )
 
+            pending_file = root / "community-prs.json"
+            pending_file.write_text(
+                json.dumps(
+                    {
+                        "base": "stable-1.4.0",
+                        "fetched_at": "2026-09-16T12:00:00Z",
+                        "pulls": [
+                            {
+                                "number": 42,
+                                "title": "Add <unsafe> crates",
+                                "created_at": "2026-09-13T12:00:00Z",
+                                "updated_at": "2026-09-16T11:00:00Z",
+                                "draft": False,
+                                "comments": 2,
+                                "review_comments": 1,
+                                "commits": 3,
+                                "manifests": [
+                                    {"path": "index/au/aunit/aunit-1.1.0.toml", "status": "added", "additions": 20, "deletions": 0},
+                                    {"path": "index/ne/new_crate/new_crate-0.1.0.toml", "status": "added", "additions": 30, "deletions": 0},
+                                    {"path": "index/au/aunit/aunit-1.0.0.toml", "status": "modified", "additions": 1, "deletions": 1},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = root / "site"
             catalog = generate_site.generate(
                 flyology_source,
                 output,
                 community_source=community_source,
+                community_prs=pending_file,
             )
             consumer_release = catalog["packages"][0]["versions"][0]
             self.assertEqual(
@@ -746,9 +774,20 @@ Community **testing details**.
                 / "index.html"
             ).read_text(encoding="utf-8")
             self.assertIn("Recent changes.", community_home)
+            self.assertIn("1 open crate PR", community_home)
             self.assertIn("aunit", community_home)
             self.assertIn("New crate", community_changes)
             self.assertIn("aunit <code>1.0.0</code>", community_changes)
+            self.assertIn("Pending crate changes", community_changes)
+            self.assertIn("1 PR", community_changes)
+            self.assertIn("New version", community_changes)
+            self.assertIn("Manifest update", community_changes)
+            self.assertIn("Open 3 days", community_changes)
+            self.assertIn("Updated 1 hour ago", community_changes)
+            self.assertIn("3 comments", community_changes)
+            self.assertIn('href="https://github.com/alire-project/alire-index/pull/42"', community_changes)
+            self.assertIn("Add &lt;unsafe&gt; crates", community_changes)
+            self.assertNotIn("Add <unsafe> crates", community_changes)
             self.assertIn("Alire community index", community_stats)
             self.assertIn('href="../../stats/"', community_stats)
             self.assertIn("Not declared", community_stats)

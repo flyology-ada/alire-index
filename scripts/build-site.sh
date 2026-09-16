@@ -27,6 +27,9 @@ community_args=()
 if [[ -f "$community_index/index/index.toml" ]]; then
   community_args=(--community-source "$community_index/index")
 fi
+if [[ -n "${COMMUNITY_PRS_FILE:-}" ]]; then
+  community_args+=(--community-prs "$COMMUNITY_PRS_FILE")
+fi
 
 "$python_bin" "$repo_root/scripts/generate-site.py" \
   --output "$site_dir" "${community_args[@]}"

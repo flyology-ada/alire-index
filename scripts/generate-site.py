@@ -2780,7 +2780,11 @@ def render_site_header(
     </header>"""
 
 
-def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
+def render_html(
+    catalog: dict[str, Any],
+    history: list[dict[str, Any]],
+    pending: dict[str, Any] | None = None,
+) -> str:
     packages = catalog["packages"]
     catalog_name = catalog["catalog"]["name"]
     is_community = catalog_name == "community"
@@ -2859,6 +2863,7 @@ def render_html(catalog: dict[str, Any], history: list[dict[str, Any]]) -> str:
         </div>
       </div>
       {render_change_preview(catalog, history)}
+      {render_pending_preview(pending, catalog) if is_community and pending is not None else ''}
       <section class="catalog page-shell" id="catalog" aria-labelledby="catalog-title" data-catalog>
         <div class="catalog-heading">
           <div>
@@ -3111,8 +3116,127 @@ def render_detail_header(root_prefix: str, catalog: dict[str, Any]) -> str:
     return render_site_header(root_prefix, "packages", catalog)
 
 
+def pending_manifest(path: str) -> tuple[str, str] | None:
+    parts = path.split("/")
+    if len(parts) != 4 or parts[0] != "index" or not parts[3].endswith(".toml"):
+        return None
+    name = parts[2]
+    prefix = f"{name}-"
+    if not parts[3].startswith(prefix):
+        return None
+    version = parts[3][len(prefix) : -len(".toml")]
+    return (name, version) if version else None
+
+
+def pending_changes(pending: dict[str, Any], catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    packages = {package["name"]: package for package in catalog["packages"]}
+    results = []
+    for pull in pending["pulls"]:
+        manifests = []
+        for file in pull["manifests"]:
+            parsed = pending_manifest(file["path"])
+            if parsed is None:
+                continue
+            name, version = parsed
+            package = packages.get(name)
+            indexed = package is not None and any(
+                release["version"] == version for release in package["versions"]
+            )
+            if file["status"] == "removed":
+                kind = "Removal proposed"
+            elif indexed or file["status"] != "added":
+                kind = "Manifest update"
+            elif package is None:
+                kind = "New crate"
+            else:
+                kind = "New version"
+            manifests.append({**file, "name": name, "version": version, "kind": kind})
+        if manifests:
+            results.append({**pull, "manifests": manifests})
+    return results
+
+
+def elapsed_label(start: str, end: str) -> str:
+    elapsed = max(0, int((parse_instant(end) - parse_instant(start)).total_seconds()))
+    if elapsed >= 86400:
+        return counted(elapsed // 86400, "day")
+    if elapsed >= 3600:
+        return counted(elapsed // 3600, "hour")
+    return "less than an hour"
+
+
+def render_pending_preview(pending: dict[str, Any], catalog: dict[str, Any]) -> str:
+    count = len(pending_changes(pending, catalog))
+    return (
+        '<div class="pending-preview page-shell">'
+        f'<p><strong>{counted(count, "open crate PR")}</strong> in the '
+        'community index. <a href="changes/#pending">Inspect pending changes</a></p>'
+        '</div>'
+    )
+
+
+def render_pending_section(pending: dict[str, Any], catalog: dict[str, Any]) -> str:
+    pulls = pending_changes(pending, catalog)
+    fetched_at = pending["fetched_at"]
+    rows = []
+    for pull in pulls:
+        number = int(pull["number"])
+        url = f"{COMMUNITY_REPOSITORY_URL}/pull/{number}"
+        manifest_rows = []
+        for file in pull["manifests"]:
+            name = html.escape(file["name"])
+            version = html.escape(file["version"])
+            manifest_rows.append(
+                '<li class="pending-manifest">'
+                f'<span class="change-kind">{html.escape(file["kind"])}</span>'
+                f'<span class="pending-manifest-name">{name} <code>{version}</code></span>'
+                f'<span class="pending-manifest-diff">+{int(file["additions"])} '
+                f'−{int(file["deletions"])}</span>'
+                f'<code class="pending-manifest-path">{html.escape(file["path"])}</code>'
+                '</li>'
+            )
+        draft = '<span class="pending-draft">Draft</span>' if pull["draft"] else ''
+        rows.append(
+            '<li class="pending-pr">'
+            '<div class="pending-pr-heading">'
+            f'<a href="{url}">{html.escape(pull["title"])}</a>'
+            f'<span>#{number}</span>{draft}'
+            '</div>'
+            '<div class="pending-pr-meta">'
+            f'<span>Open {elapsed_label(pull["created_at"], fetched_at)}</span>'
+            f'<span>Updated {elapsed_label(pull["updated_at"], fetched_at)} ago</span>'
+            f'<span>{counted(int(pull["commits"]), "commit")}</span>'
+            f'<span>{counted(int(pull["comments"]) + int(pull["review_comments"]), "comment")}</span>'
+            '</div>'
+            f'<ul class="pending-manifests">{"".join(manifest_rows)}</ul>'
+            '</li>'
+        )
+    count = len(pulls)
+    body = (
+        f'<ol class="pending-pr-list">{"".join(rows)}</ol>'
+        if rows
+        else '<p class="pending-empty">No open PRs change crate manifests.</p>'
+    )
+    return (
+        '<section class="pending-section" id="pending" aria-label="Pending community proposals">'
+        '<details class="pending-disclosure">'
+        '<summary><span><span class="eyebrow">Open proposals</span>'
+        '<span class="pending-title">Pending crate changes</span></span>'
+        f'<span class="pending-count">{counted(count, "PR")}</span>'
+        '<span class="pending-toggle" aria-hidden="true">+</span></summary>'
+        '<div class="pending-body">'
+        f'<p>Open proposals against <code>{html.escape(pending["base"])}</code>. '
+        'These proposed changes have not been merged into the index. '
+        f'Activity was checked <time datetime="{html.escape(fetched_at, quote=True)}">'
+        f'{html.escape(parse_instant(fetched_at).strftime("%d %b %Y %H:%M UTC"))}</time>.</p>'
+        f'{body}</div></details></section>'
+    )
+
+
 def render_changes_page(
-    catalog: dict[str, Any], history: list[dict[str, Any]]
+    catalog: dict[str, Any],
+    history: list[dict[str, Any]],
+    pending: dict[str, Any] | None = None,
 ) -> str:
     history = collapse_daily_development_changes(history)
     catalog_name = catalog["catalog"]["name"]
@@ -3197,6 +3321,8 @@ def render_changes_page(
         <p><strong>{published_count}</strong> new versions</p>
         <p><strong>{development_count}</strong> development updates</p>
       </div>
+      {render_pending_section(pending, catalog) if catalog_name == "community" and pending is not None else ''}
+      {'<p class="change-history-label">Indexed changes</p>' if catalog_name == "community" and pending is not None else ''}
       {history_html}
     </main>
     <footer class="site-footer">
@@ -3773,7 +3899,41 @@ INDEX_CSS = r"""
 .change-stats p:first-child { padding-left: 0; }
 .change-stats p:last-child { border-right: 0; }
 .change-stats strong { display: block; color: var(--ink); font: 620 1rem var(--font-mono); }
-.change-history { margin-top: 4rem; }
+.pending-preview { padding-block: 1.1rem; border-bottom: 1px solid var(--line); }
+.pending-preview p { margin: 0; color: var(--ink-soft); font-size: .8rem; }
+.pending-preview strong { color: var(--ink); }
+.pending-preview a { margin-left: .3rem; font-weight: 620; }
+.pending-section { margin-top: 2.5rem; border: 1px solid var(--line); background: var(--paper); }
+.pending-disclosure > summary { display: flex; align-items: center; padding: 1.3rem 1.25rem; gap: 1.2rem; background: var(--surface); cursor: pointer; list-style: none; }
+.pending-disclosure > summary::-webkit-details-marker { display: none; }
+.pending-disclosure > summary:hover { background: var(--surface-strong); }
+.pending-disclosure > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: .2rem; }
+.pending-disclosure > summary > span:first-child { display: grid; gap: .15rem; }
+.pending-title { color: var(--ink); font-size: 1.15rem; font-weight: 620; }
+.pending-count { margin-left: auto; color: var(--violet-deep); font: 620 .8rem var(--font-mono); white-space: nowrap; }
+.pending-toggle { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); transition: transform 180ms var(--ease-out); }
+.pending-disclosure[open] .pending-toggle { transform: rotate(45deg); }
+.pending-body { padding: 1.25rem 1.25rem 1.6rem; border-top: 1px solid var(--line); }
+.pending-body > p { max-width: 68ch; margin: .3rem 0 1.2rem; color: var(--ink-soft); font-size: .78rem; }
+.pending-pr-list, .pending-manifests { margin: 0; padding: 0; list-style: none; }
+.pending-pr-list { border-top: 1px solid var(--line); }
+.pending-pr { padding: 1.3rem .15rem; border-bottom: 1px solid var(--line); }
+.pending-pr:last-child { border-bottom: 0; }
+.pending-pr-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem .65rem; }
+.pending-pr-heading a { color: var(--ink); font-size: .9rem; font-weight: 620; text-decoration-thickness: 1px; text-underline-offset: .2em; }
+.pending-pr-heading a:hover { color: var(--violet-deep); }
+.pending-pr-heading > span { color: var(--ink-soft); font: .7rem var(--font-mono); }
+.pending-pr-heading .pending-draft { color: var(--violet-deep); }
+.pending-pr-meta { display: flex; flex-wrap: wrap; margin: .45rem 0 .85rem; gap: .25rem 1rem; color: var(--ink-soft); font: .69rem var(--font-mono); }
+.pending-manifests { display: grid; gap: .4rem; }
+.pending-manifest { display: flex; flex-wrap: wrap; align-items: center; padding: .55rem .7rem; gap: .35rem .7rem; background: var(--surface); font-size: .72rem; }
+.pending-manifest-name { color: var(--ink); font-weight: 580; }
+.pending-manifest-name code { margin-left: .25rem; color: var(--violet-deep); font-size: .7rem; }
+.pending-manifest-diff { margin-left: auto; color: var(--ink-soft); font: .68rem var(--font-mono); white-space: nowrap; }
+.pending-manifest-path { width: 100%; color: var(--ink-soft); font-size: .65rem; overflow-wrap: anywhere; }
+.change-history-label { margin: 3rem 0 0; color: var(--ink-soft); font: 650 .66rem var(--font-sans); letter-spacing: .1em; text-transform: uppercase; }
+.change-history { margin-top: 1rem; }
+.change-stats + .change-history { margin-top: 4rem; }
 .change-group { padding-block: 2.2rem 3rem; border-bottom: 1px solid var(--line); }
 .change-group-heading { display: grid; grid-template-columns: 8rem minmax(0, 1fr); align-items: start; gap: 2rem; }
 .change-group-heading h2 { max-width: 34ch; margin: 0 0 .4rem; font-size: 1.25rem; letter-spacing: -.02em; }
@@ -3888,7 +4048,7 @@ INDEX_CSS = r"""
   .dependency-summary > div:last-child { border-bottom: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .package-summary, .summary-action span { transition: none; }
+  .package-summary, .summary-action span, .pending-toggle { transition: none; }
 }
 """
 
@@ -4153,6 +4313,7 @@ def write_catalog_site(
     stats: dict[str, Any],
     output: Path,
     release_documents: dict[str, ReleaseDocuments] | None = None,
+    pending: dict[str, Any] | None = None,
 ) -> None:
     documents = release_documents or {}
     (output / "assets" / "styles").mkdir(parents=True)
@@ -4218,10 +4379,10 @@ def write_catalog_site(
                 )
 
     (output / "index.html").write_text(
-        render_html(catalog, history), encoding="utf-8"
+        render_html(catalog, history, pending), encoding="utf-8"
     )
     (output / "changes" / "index.html").write_text(
-        render_changes_page(catalog, history), encoding="utf-8"
+        render_changes_page(catalog, history, pending), encoding="utf-8"
     )
     (output / "stats" / "index.html").write_text(
         render_stats_page(catalog, stats), encoding="utf-8"
@@ -4246,6 +4407,7 @@ def generate(
     include_source_history: bool | None = None,
     source_cache: Path | None = None,
     community_source: Path | None = None,
+    community_prs: Path | None = None,
 ) -> dict[str, Any]:
     if include_source_history is None:
         include_source_history = include_source_documents
@@ -4279,6 +4441,11 @@ def generate(
             community_catalog, community_source.parent, community_source
         )
         if community_catalog is not None and community_source is not None
+        else None
+    )
+    pending = (
+        json.loads(community_prs.read_text(encoding="utf-8"))
+        if community_prs is not None
         else None
     )
     release_documents: dict[str, ReleaseDocuments] = {}
@@ -4324,6 +4491,7 @@ def generate(
             community_history,
             community_stats,
             output / "community",
+            pending=pending,
         )
     (output / ".nojekyll").write_text("", encoding="utf-8")
     return catalog
@@ -4337,6 +4505,11 @@ def main() -> int:
         "--community-source",
         type=Path,
         help="also render a shadow of this checked-out community index under /community",
+    )
+    parser.add_argument(
+        "--community-prs",
+        type=Path,
+        help="snapshot of open community-index PRs produced by fetch-community-prs.py",
     )
     parser.add_argument(
         "--skip-source-documents",
@@ -4366,6 +4539,7 @@ def main() -> int:
             community_source=(
                 args.community_source.resolve() if args.community_source else None
             ),
+            community_prs=args.community_prs.resolve() if args.community_prs else None,
         )
     except (OSError, RuntimeError, tomllib.TOMLDecodeError, ValueError) as error:
         print(f"site generation failed: {error}", file=sys.stderr)
