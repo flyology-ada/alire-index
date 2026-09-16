@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import unittest
+from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,16 @@ SPEC.loader.exec_module(fetch)
 
 
 class FetchCommunityPrsTests(unittest.TestCase):
+    def test_get_json_retries_dropped_connection(self) -> None:
+        response = io.BytesIO(b'{"default_branch": "stable-1.4.0"}')
+        with patch.object(fetch, "urlopen", side_effect=[RemoteDisconnected("closed"), response]) as open_url, patch.object(
+            fetch.time, "sleep"
+        ) as sleep:
+            result = fetch.get_json("")
+        self.assertEqual(result, {"default_branch": "stable-1.4.0"})
+        self.assertEqual(open_url.call_count, 2)
+        sleep.assert_called_once_with(1)
+
     def test_snapshot_uses_default_branch_and_manifest_files(self) -> None:
         pulls = [{"number": 42}]
         files = [

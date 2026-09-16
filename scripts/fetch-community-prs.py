@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError
@@ -29,8 +31,18 @@ def get_json(path: str, **params: str | int) -> object:
     }
     if token := os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
-    with urlopen(Request(url, headers=headers), timeout=30) as response:
-        return json.load(response)
+    for attempt in range(4):
+        try:
+            with urlopen(Request(url, headers=headers), timeout=30) as response:
+                return json.load(response)
+        except HTTPError as error:
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                raise
+        except (OSError, http.client.HTTPException):
+            if attempt == 3:
+                raise
+        time.sleep(2**attempt)
+    raise AssertionError("unreachable")
 
 
 def pages(path: str, **params: str | int) -> list[dict]:
